@@ -1,0 +1,125 @@
+fun get_byte arr i = Word8.toInt (Word8Array.sub arr i);
+
+(* Little-endian: read 8 bytes as u64 starting at index i *)
+fun get_u64 arr i =
+  get_byte arr i +
+  get_byte arr (i+1) * 256 +
+  get_byte arr (i+2) * 65536 +
+  get_byte arr (i+3) * 16777216 +
+  get_byte arr (i+4) * 4294967296 +
+  get_byte arr (i+5) * 1099511627776 +
+  get_byte arr (i+6) * 281474976710656 +
+  get_byte arr (i+7) * 72057594037927936;
+
+(* Little-endian: read 4 bytes as signed int starting at index i *)
+fun get_int arr i =
+  let
+    val raw = get_byte arr i +
+              get_byte arr (i+1) * 256 +
+              get_byte arr (i+2) * 65536 +
+              get_byte arr (i+3) * 16777216
+  in
+    if get_byte arr (i+3) >= 128
+    then raw - 4294967296
+    else raw
+  end;
+
+fun get_arr name len =
+  let
+    val arr = Word8Array.array (len * 4) (Word8.fromInt 0)
+    val _ = #(arr) name arr
+    fun read_int i = get_int arr (i * 4)
+    fun read_ints i = if i >= len then [] else read_int i :: read_ints (i + 1)
+  in
+    read_ints 0
+  end;
+
+fun get_arr_u64 name len =
+  let
+    val arr = Word8Array.array (len * 8) (Word8.fromInt 0)
+    val _ = #(arr) name arr
+    fun read_val i = get_u64 arr (i * 8)
+    fun read_vals i = if i >= len then [] else read_val i :: read_vals (i + 1)
+  in
+    read_vals 0
+  end;
+
+fun do_TRUSTED_CHK_CLS_PRODUCE step_arr =
+  let
+    val id = get_u64 step_arr 1
+    val nb_lits = get_int step_arr 9
+    val nb_hints = get_int step_arr 13
+    val _ = print ("add ID: " ^ Int.toString id ^"\n")
+    val _ = print ("num lits: " ^ Int.toString nb_lits^"\n")
+    val _ = print ("num hints: " ^ Int.toString nb_hints^"\n")
+    val cl = get_arr "buf_lits" nb_lits
+    val _ = print ("Literals: " ^ String.concatWith " " (List.map Int.toString cl) ^ "\n")
+    val hints = get_arr_u64 "buf_hints" nb_hints
+    val _ = print ("Hints: " ^ String.concatWith " " (List.map Int.toString hints) ^ "\n")
+  in
+    ()
+  end
+
+fun do_TRUSTED_CHK_INIT step_arr =
+  let
+    val nb_vars = get_int step_arr 1
+    val _ = print ("INIT VARS: " ^ Int.toString nb_vars ^"\n")
+  in
+    ()
+  end
+
+fun do_callback () =
+  let
+    val arr = Word8Array.array 0 (Word8.fromInt 0)
+    val _ = #(callback) "1" arr
+  in
+    ()
+  end
+
+fun loop step_arr =
+let
+  val step = #(step) "" step_arr
+  val c = Char.fromByte (Word8Array.sub step_arr 0)
+in
+  case c of
+    #"a" => (* TRUSTED_CHK_CLS_PRODUCE *)
+      (do_TRUSTED_CHK_CLS_PRODUCE step_arr;
+      do_callback ();
+      loop step_arr)
+  | #"i" => (* TRUSTED_CHK_CLS_IMPORT *)
+      let
+        val id = get_u64 step_arr 1
+        val nb_lits = get_int step_arr 9
+        val _ = print ("IMPORT ID: " ^ Int.toString id ^"\n")
+        val _ = print ("num lits: " ^ Int.toString nb_lits ^"\n")
+        val cl = get_arr "buf_lits" nb_lits
+        val _ = print ("Literals: " ^ String.concatWith " " (List.map Int.toString cl) ^ "\n")
+      in
+        do_callback ();
+        loop step_arr
+      end
+  | #"d" => (* TRUSTED_CHK_CLS_DELETE *)
+      let
+        val nb_hints = get_int step_arr 1
+        val _ = print ("DEL HINTS: " ^ Int.toString nb_hints ^"\n")
+        val hints = get_arr_u64 "buf_hints" nb_hints
+        val _ = print ("Hints: " ^ String.concatWith " " (List.map Int.toString hints) ^ "\n")
+      in
+        do_callback ();
+        loop step_arr
+      end
+  | #"V" => (* TRUSTED_CHK_VALIDATE_UNSAT: void *)
+      let
+        val _ = print "VALIDATE_UNSAT\n"
+      in
+        do_callback ();
+        loop step_arr
+      end
+  | #"T" => (* TRUSTED_CHK_TERMINATE: void *)
+      (do_callback ();
+      print "TERMINATE\n")
+  | _ =>
+      print ("UNKNOWN: " ^ Int.toString (get_byte step_arr 0) ^ "\n")
+end
+
+val _ = loop (Word8Array.array 17 (Word8.fromInt 0));

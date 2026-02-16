@@ -1,6 +1,7 @@
 
 cmake_minimum_required(VERSION 3.11.4)
 project (impcheck_modules)
+enable_language(ASM)
 
 add_definitions("-std=gnu99 -Wall -Wextra -Werror -pedantic-errors -flto -g")
 if(IMPCHECK_WRITE_DIRECTIVES)
@@ -19,8 +20,17 @@ endif()
 add_executable(impcheck_parse
     src/trusted/hash.c src/trusted/secret.c src/trusted/siphash.c src/trusted/trusted_parser.c src/trusted/trusted_utils.c src/trusted/vectors.c src/writer.c 
     src/trusted/main_parse.c)
-add_executable(impcheck_check 
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.S
+    COMMAND ./cake --main_return=true < rup.cml > rup.S
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.cml
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml
+    COMMENT "Building rup.S from rup.cml"
+)
+
+add_executable(impcheck_check
     src/trusted/confirm.c src/trusted/hash.c src/trusted/lrat_check.c src/trusted/secret.c src/trusted/siphash.c src/trusted/trusted_checker.c src/trusted/top_check.c src/trusted/trusted_utils.c src/trusted/vectors.c src/writer.c
+    src/trusted/cakeml/rup.S
     src/trusted/main_check.c)
 add_executable(impcheck_confirm
     src/trusted/confirm.c src/trusted/hash.c src/trusted/secret.c src/trusted/siphash.c src/trusted/trusted_parser.c src/trusted/trusted_utils.c src/trusted/vectors.c src/writer.c 
