@@ -24,49 +24,40 @@ fun get_int arr i =
     else raw
   end;
 
-fun get_arr name len =
+fun int_to_4le b i =
+  String.implode [
+    Char.chr (if b then 1 else 0),
+    Char.chr (i mod 256),
+    Char.chr ((i div 256) mod 256),
+    Char.chr ((i div 65536) mod 256),
+    Char.chr ((i div 16777216) mod 256)
+  ];
+
+(* get_clause returns (clause_arr, literals)
+   clause_arr is passed through and possibly resized for reuse *)
+fun get_clause clause_arr trusted len =
   let
-    val arr = Word8Array.array (len * 4) (Word8.fromInt 0)
-    val _ = #(arr) name arr
+    val needed = len * 4
+    val arr = if Word8Array.length clause_arr < needed
+              then Word8Array.array needed (Word8.fromInt 0)
+              else clause_arr
+    val hdr = int_to_4le trusted len
+    val _ = #(clause) hdr arr
     fun read_int i = get_int arr (i * 4)
     fun read_ints i = if i >= len then [] else read_int i :: read_ints (i + 1)
   in
-    read_ints 0
+    (arr, read_ints 0)
   end;
 
-fun get_arr_u64 name len =
+fun get_hints len =
   let
     val arr = Word8Array.array (len * 8) (Word8.fromInt 0)
-    val _ = #(arr) name arr
+    val _ = #(hints) "" arr
     fun read_val i = get_u64 arr (i * 8)
     fun read_vals i = if i >= len then [] else read_val i :: read_vals (i + 1)
   in
     read_vals 0
   end;
-
-fun do_TRUSTED_CHK_CLS_PRODUCE step_arr =
-  let
-    val id = get_u64 step_arr 1
-    val nb_lits = get_int step_arr 9
-    val nb_hints = get_int step_arr 13
-    val _ = print ("add ID: " ^ Int.toString id ^"\n")
-    val _ = print ("num lits: " ^ Int.toString nb_lits^"\n")
-    val _ = print ("num hints: " ^ Int.toString nb_hints^"\n")
-    val cl = get_arr "buf_lits" nb_lits
-    val _ = print ("Literals: " ^ String.concatWith " " (List.map Int.toString cl) ^ "\n")
-    val hints = get_arr_u64 "buf_hints" nb_hints
-    val _ = print ("Hints: " ^ String.concatWith " " (List.map Int.toString hints) ^ "\n")
-  in
-    ()
-  end
-
-fun do_TRUSTED_CHK_INIT step_arr =
-  let
-    val nb_vars = get_int step_arr 1
-    val _ = print ("INIT VARS: " ^ Int.toString nb_vars ^"\n")
-  in
-    ()
-  end
 
 fun do_callback () =
   let
@@ -76,44 +67,56 @@ fun do_callback () =
     ()
   end
 
-fun loop step_arr =
+fun loop step_arr clause_arr =
 let
   val step = #(step) "" step_arr
   val c = Char.fromByte (Word8Array.sub step_arr 0)
 in
   case c of
     #"a" => (* TRUSTED_CHK_CLS_PRODUCE *)
-      (do_TRUSTED_CHK_CLS_PRODUCE step_arr;
-      do_callback ();
-      loop step_arr)
+      let
+        val id = get_u64 step_arr 1
+        val nb_lits = get_int step_arr 9
+        val nb_hints = get_int step_arr 13
+        val _ = print ("add ID: " ^ Int.toString id ^"\n")
+        val _ = print ("num lits: " ^ Int.toString nb_lits^"\n")
+        val (clause_arr, cl) = get_clause clause_arr False nb_lits
+        val _ = print ("Literals: " ^ String.concatWith " " (List.map Int.toString cl) ^ "\n")
+        val _ = print ("num hints: " ^ Int.toString nb_hints^"\n")
+        val hints = get_hints nb_hints
+        val _ = print ("Hints: " ^ String.concatWith " " (List.map Int.toString hints) ^ "\n")
+      in
+        do_callback ();
+        loop step_arr clause_arr
+      end
   | #"i" => (* TRUSTED_CHK_CLS_IMPORT *)
       let
         val id = get_u64 step_arr 1
         val nb_lits = get_int step_arr 9
+        val (clause_arr, cl) = get_clause clause_arr True nb_lits
         val _ = print ("IMPORT ID: " ^ Int.toString id ^"\n")
         val _ = print ("num lits: " ^ Int.toString nb_lits ^"\n")
-        val cl = get_arr "buf_lits" nb_lits
         val _ = print ("Literals: " ^ String.concatWith " " (List.map Int.toString cl) ^ "\n")
       in
         do_callback ();
-        loop step_arr
+        loop step_arr clause_arr
       end
   | #"d" => (* TRUSTED_CHK_CLS_DELETE *)
       let
         val nb_hints = get_int step_arr 1
         val _ = print ("DEL HINTS: " ^ Int.toString nb_hints ^"\n")
-        val hints = get_arr_u64 "buf_hints" nb_hints
+        val hints = get_hints nb_hints
         val _ = print ("Hints: " ^ String.concatWith " " (List.map Int.toString hints) ^ "\n")
       in
         do_callback ();
-        loop step_arr
+        loop step_arr clause_arr
       end
   | #"V" => (* TRUSTED_CHK_VALIDATE_UNSAT: void *)
       let
         val _ = print "VALIDATE_UNSAT\n"
       in
         do_callback ();
-        loop step_arr
+        loop step_arr clause_arr
       end
   | #"T" => (* TRUSTED_CHK_TERMINATE: void *)
       (do_callback ();
@@ -122,4 +125,5 @@ in
       print ("UNKNOWN: " ^ Int.toString (get_byte step_arr 0) ^ "\n")
 end
 
-val _ = loop (Word8Array.array 17 (Word8.fromInt 0));
+val _ = loop (Word8Array.array 17 (Word8.fromInt 0))
+             (Word8Array.array 0 (Word8.fromInt 0));

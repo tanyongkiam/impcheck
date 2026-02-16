@@ -16,6 +16,8 @@
 #include "../writer.h"
 #endif
 
+#define SIMULATED_IMPORT 0  // last_directive value during simulated import phase
+
 // Instantiate int_vec
 #define TYPE int
 #define TYPED(THING) int_ ## THING
@@ -37,10 +39,9 @@ signature formula_sig; // formula signature
 
 bool do_logging = true;
 
-// Buffering.
 signature buf_sig;
 struct int_vec* buf_lits;
-struct u64_vec* buf_hints;
+// struct u64_vec* buf_hints;
 
 /* from lrat_check.c */
 extern struct hash_table* clause_table;
@@ -76,23 +77,16 @@ void read_literals(int nb_lits) {
     trusted_utils_read_ints(buf_lits->data, nb_lits, input);
 }
 
-void read_hints(int nb_hints) {
-    u64_vec_reserve(buf_hints, nb_hints);
-    trusted_utils_read_uls(buf_hints->data, nb_hints, input);
-}
-
 void tc_init(const char* fifo_in, const char* fifo_out) {
     input = fopen(fifo_in, "r");
     if (!input) trusted_utils_exit_eof();
     output = fopen(fifo_out, "w");
     if (!output) trusted_utils_exit_eof();
     buf_lits = int_vec_init(1 << 14);
-    buf_hints = u64_vec_init(1 << 14);
 }
 
 void tc_end(void) {
     int_vec_free(buf_lits);
-    u64_vec_free(buf_hints);
     fclose(output);
     fclose(input);
 }
@@ -104,14 +98,12 @@ bool reported_error;
 // Next clause ID to replay during simulated import phase (1..nb_loaded_clauses)
 u64 fake_import_id;
 
-// State saved by ffistep for fficallback to perform I/O response
-int last_directive;  // directive type char, or 0 during simulated import phase
-int last_nb_hints;   // hint count (delete), for counter update
-bool last_share;     // whether to return signature (produce)
-#ifdef IMPCHECK_DOUBLE_CHECK
-u64 last_id;         // clause ID (produce, import)
-int last_nb_lits;    // literal count (produce, import)
-#endif
+// State passed from ffistep to fficallback
+int last_directive;    // directive type char, or 0 during simulated import phase
+u64 last_id;           // clause ID for current directive
+int last_nb_lits;      // nb_lits for current PRODUCE/IMPORT (used by fficlause)
+int last_nb_hints;     // hint count (produce/delete), for ffihints and counter update
+int* last_cls_data;    // clause data pointer during simulated import phase
 
 int tc_run(bool check_model, bool lenient) {
     clock_t start = clock();
@@ -164,8 +156,10 @@ int tc_run(bool check_model, bool lenient) {
         } else if (c == TRUSTED_CHK_LOAD) {
 
             const int nb_lits = trusted_utils_read_int(input);
-            read_literals(nb_lits);
-            for (int i = 0; i < nb_lits; i++) top_check_load(buf_lits->data[i]);
+            int* lits = trusted_utils_malloc(nb_lits * sizeof(int));
+            trusted_utils_read_ints(lits, nb_lits, input);
+            for (int i = 0; i < nb_lits; i++) top_check_load(lits[i]);
+            free(lits);
             // NO FEEDBACK
 
         } else if (c == TRUSTED_CHK_END_LOAD) {
@@ -247,33 +241,66 @@ void ffiwrite (unsigned char *c, long clen, unsigned char *a, long alen){
   }
 }
 
-void ffiarr (unsigned char *c, long clen, unsigned char *a, long alen){
-  (void)alen;
-  if (clen == 8 && memcmp(c, "buf_lits", 8) == 0) {
-      memcpy(a, buf_lits->data, alen);
+// CakeML's clause-fetching interface
+// c[0]: nonzero = trusted (import), 0 = untrusted (produce)
+// c[1..4]: nb_lits as little-endian int
+void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
+  (void)clen;
+  assert(clen == 5);
+
+  bool trusted = c[0];
+  int nb_lits;
+  memcpy(&nb_lits, &c[1], sizeof(int));
+  assert(nb_lits == last_nb_lits);
+
+  if (trusted) {
+      // Trusted import steps
+      assert((long)(nb_lits * sizeof(int)) <= alen);
+      if (last_directive == SIMULATED_IMPORT) {
+          memcpy(a, last_cls_data, nb_lits * sizeof(int));
+      } else { // last_directive == TRUSTED_CHK_CLS_IMPORT
+          trusted_utils_read_ints((int*)a, nb_lits, input);
+          trusted_utils_read_sig(buf_sig, input);
+
+          // TODO: we directly rely on the existing signature calculation
+          // but do not need to insert into the clause DB
+          bool res = top_check_import(last_id, (const int*)a, nb_lits, buf_sig);
+          say(res);
+      }
+  } else { // last_directive == TRUSTED_CHK_CLS_PRODUCE
+      // lits already read by ffistep into buf_lits
+      assert((long)(nb_lits * sizeof(int)) <= alen);
+      memcpy(a, buf_lits->data, nb_lits * sizeof(int));
   }
-  else if (clen == 9 && memcmp(c, "buf_hints", 9) == 0) {
-      memcpy(a, buf_hints->data, alen);
-  }
-  else
-    assert(false);
+}
+
+void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
+  (void)c; (void)clen;
+
+  assert((long)(last_nb_hints * sizeof(u64)) <= alen);
+  // Read hints from pipe directly into CakeML's array
+  trusted_utils_read_uls((u64*)a, last_nb_hints, input);
 }
 
 void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
   (void)a; (void)alen; (void)clen;
   assert(clen == 1);
 
-  bool res = (c[0] == '1');
+  if (last_directive == SIMULATED_IMPORT) return; // no-op (simulated import phase)
+
+  bool res = c[0];
 
   if (last_directive == TRUSTED_CHK_CLS_PRODUCE) {
 
-#ifdef IMPCHECK_DOUBLE_CHECK
-      bool c_res = top_check_produce(last_id, buf_lits->data, last_nb_lits,
-          buf_hints->data, last_nb_hints, last_share ? buf_sig : 0);
-      assert(res == c_res);
-#endif
+      const bool share = trusted_utils_read_bool(input);
+
+      // TODO: how should we return the derived clause?
+      // Also, if share is true, we need to fill the buf_sig appropriately
+      // bool res = top_check_produce(id, buf_lits->data, nb_lits,
+      //    buf_hints->data, nb_hints, share ? buf_sig : 0);
+
       say(res);
-      if (last_share) trusted_utils_write_sig(buf_sig, output);
+      if (share) trusted_utils_write_sig(buf_sig, output);
 #if IMPCHECK_FLUSH_ALWAYS
       UNLOCKED_IO(fflush)(output);
 #endif
@@ -281,28 +308,18 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
 
   } else if (last_directive == TRUSTED_CHK_CLS_IMPORT) {
 
-#ifdef IMPCHECK_DOUBLE_CHECK
-      bool c_res = top_check_import(last_id, buf_lits->data, last_nb_lits, buf_sig);
-      assert(res == c_res);
-#endif
-      say(res);
+      // say(res) is handled immediately upon reading
       nb_imported++;
 
   } else if (last_directive == TRUSTED_CHK_CLS_DELETE) {
 
-#ifdef IMPCHECK_DOUBLE_CHECK
-      bool c_res = top_check_delete(buf_hints->data, last_nb_hints);
-      assert(res == c_res);
-#endif
       say(res);
       nb_deleted += last_nb_hints;
 
   } else if (last_directive == TRUSTED_CHK_VALIDATE_UNSAT) {
 
-#ifdef IMPCHECK_DOUBLE_CHECK
-      bool c_res = top_check_validate_unsat(buf_sig);
-      assert(res == c_res);
-#endif
+      // TODO: bool res = top_check_validate_unsat(buf_sig);
+      // Need the signature computation part of validate_unsat here
       say(res);
       trusted_utils_write_sig(buf_sig, output);
       UNLOCKED_IO(fflush)(output);
@@ -318,12 +335,13 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
 #endif
 }
 
+// The main stepping function called by CakeML
 void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
   (void)empty; (void)clen; (void)a; (void)alen;
   assert(clen == 0);
   assert(alen == 17);
   // 1 byte for initial step symbol
-  // 8 + 4 + 4 for TRUSTED_CHK_CLS_PRODUCE
+  // max of 8 + 4 + 4 for TRUSTED_CHK_CLS_PRODUCE
 
   // Simulated import phase: replay loaded formula clauses to CakeML
   // as import steps.
@@ -332,20 +350,20 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       const u64 id = fake_import_id;
       int* cls = (int*) hash_table_find(clause_table, id);
 
-      // count literals (zero-terminated)
+      // count literals (always zero-terminated)
       int nb_lits = 0;
       while (cls[nb_lits] != 0) nb_lits++;
 
-      // copy into buf_lits
-      int_vec_reserve(buf_lits, nb_lits);
-      memcpy(buf_lits->data, cls, nb_lits * sizeof(int));
+      // store pointer for fficlause to copy from
+      last_cls_data = cls;
+      last_nb_lits = nb_lits;
 
-      // fill CakeML step buffer as import directive
+      // fill CakeML buffer with import directive
       a[0] = TRUSTED_CHK_CLS_IMPORT;
       memcpy(&a[1], &id, sizeof(id));
       memcpy(&a[1 + sizeof(id)], &nb_lits, sizeof(nb_lits));
 
-      last_directive = 0;
+      last_directive = SIMULATED_IMPORT;
       fake_import_id++;
       return;
   }
@@ -357,46 +375,31 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
   if (c == TRUSTED_CHK_CLS_PRODUCE) {
 
-      // parse
       const u64 id = trusted_utils_read_ul(input);
       const int nb_lits = trusted_utils_read_int(input);
       read_literals(nb_lits);
       last_nb_hints = trusted_utils_read_int(input);
-      read_hints(last_nb_hints);
-      last_share = trusted_utils_read_bool(input);
-#ifdef IMPCHECK_DOUBLE_CHECK
       last_id = id;
       last_nb_lits = nb_lits;
-#endif
 
-      // copy id (8 bytes), nb_lits (4 bytes), nb_hints (4 bytes) into a[1] onwards
       memcpy(&a[1], &id, sizeof(id));
       memcpy(&a[1 + sizeof(id)], &nb_lits, sizeof(nb_lits));
       memcpy(&a[1 + sizeof(id) + sizeof(nb_lits)], &last_nb_hints, sizeof(last_nb_hints));
 
   } else if (c == TRUSTED_CHK_CLS_IMPORT) {
 
-      // parse
       const u64 id = trusted_utils_read_ul(input);
       const int nb_lits = trusted_utils_read_int(input);
-      read_literals(nb_lits);
-      trusted_utils_read_sig(buf_sig, input);
-#ifdef IMPCHECK_DOUBLE_CHECK
       last_id = id;
       last_nb_lits = nb_lits;
-#endif
 
-      // copy id (8 bytes), nb_lits (4 bytes) into a[1] onwards
       memcpy(&a[1], &id, sizeof(id));
       memcpy(&a[1 + sizeof(id)], &nb_lits, sizeof(nb_lits));
 
   } else if (c == TRUSTED_CHK_CLS_DELETE) {
 
-      // parse
       last_nb_hints = trusted_utils_read_int(input);
-      read_hints(last_nb_hints);
 
-      // copy nb_hints (4 bytes) into a[1]
       memcpy(&a[1], &last_nb_hints, sizeof(last_nb_hints));
   }
   // VALIDATE_UNSAT, TERMINATE: no payload to parse
