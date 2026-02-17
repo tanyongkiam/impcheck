@@ -24,6 +24,14 @@ fun get_int arr i =
     else raw
   end;
 
+fun int_to_le i =
+  String.implode [
+    Char.chr (i mod 256),
+    Char.chr ((i div 256) mod 256),
+    Char.chr ((i div 65536) mod 256),
+    Char.chr ((i div 16777216) mod 256)
+  ];
+
 fun int_to_4le b i =
   String.implode [
     Char.chr (if b then 1 else 0),
@@ -52,17 +60,16 @@ fun get_clause clause_arr trusted len =
 fun get_hints len =
   let
     val arr = Word8Array.array (len * 8) (Word8.fromInt 0)
-    val _ = #(hints) "" arr
+    val _ = #(hints) (int_to_le len) arr
     fun read_val i = get_u64 arr (i * 8)
     fun read_vals i = if i >= len then [] else read_val i :: read_vals (i + 1)
   in
     read_vals 0
   end;
 
-fun do_callback () =
+fun do_callback step_arr =
   let
-    val arr = Word8Array.array 0 (Word8.fromInt 0)
-    val _ = #(callback) "1" arr
+    val _ = #(callback) "1" step_arr
   in
     ()
   end
@@ -86,7 +93,7 @@ in
         val hints = get_hints nb_hints
         val _ = print ("Hints: " ^ String.concatWith " " (List.map Int.toString hints) ^ "\n")
       in
-        do_callback ();
+        do_callback step_arr;
         loop step_arr clause_arr
       end
   | #"i" => (* TRUSTED_CHK_CLS_IMPORT *)
@@ -98,7 +105,7 @@ in
         val _ = print ("num lits: " ^ Int.toString nb_lits ^"\n")
         val _ = print ("Literals: " ^ String.concatWith " " (List.map Int.toString cl) ^ "\n")
       in
-        do_callback ();
+        do_callback step_arr;
         loop step_arr clause_arr
       end
   | #"d" => (* TRUSTED_CHK_CLS_DELETE *)
@@ -108,18 +115,18 @@ in
         val hints = get_hints nb_hints
         val _ = print ("Hints: " ^ String.concatWith " " (List.map Int.toString hints) ^ "\n")
       in
-        do_callback ();
+        do_callback step_arr;
         loop step_arr clause_arr
       end
   | #"V" => (* TRUSTED_CHK_VALIDATE_UNSAT: void *)
       let
         val _ = print "VALIDATE_UNSAT\n"
       in
-        do_callback ();
+        do_callback step_arr;
         loop step_arr clause_arr
       end
   | #"T" => (* TRUSTED_CHK_TERMINATE: void *)
-      (do_callback ();
+      (do_callback step_arr;
       print "TERMINATE\n")
   | _ =>
       print ("UNKNOWN: " ^ Int.toString (get_byte step_arr 0) ^ "\n")
