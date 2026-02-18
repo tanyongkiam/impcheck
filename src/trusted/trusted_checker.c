@@ -96,14 +96,12 @@ void tc_end(void) {
 
 // Counters and error state, shared between tc_run and fficallback
 u64 nb_produced, nb_imported, nb_deleted;
+bool all_ok;
 bool reported_error;
 
-// Next clause ID to replay during simulated import phase (1..nb_loaded_clauses)
-u64 fake_import_id;
-
 // State passed from ffistep to other FFIs
-bool last_was_simulated; // true during simulated import phase
-int* last_cls_data;      // clause data pointer during simulated import phase
+u64 fake_import_id;      // Next clause ID to replay in import phase
+int* last_cls_data;      // non-NULL during simulated import phase
 
 int tc_run(bool check_model, bool lenient) {
     clock_t start = clock();
@@ -165,18 +163,32 @@ int tc_run(bool check_model, bool lenient) {
         } else if (c == TRUSTED_CHK_END_LOAD) {
 
             say_with_flush(top_check_end_load());
-            break;
 
         } else {
             trusted_utils_log_err("Invalid directive during formula loading!");
             break;
         }
+
+#if IMPCHECK_WRITE_DIRECTIVES
+        writer_flush();
+#endif
+
+        if (MALLOB_UNLIKELY(!top_check_valid())) {
+            if (!reported_error) {
+                trusted_utils_log_err(trusted_utils_msgstr);
+                reported_error = true;
+            }
+        }
+
+        // breaking here to ensure same I/O behavior
+        if (c == TRUSTED_CHK_END_LOAD) break;
     }
 
+    all_ok = top_check_valid();
     fake_import_id = 1;
     cml_main(); // Passing main loop control to CakeML
 
-    printf("DEBUG: control returned\n");
+    say_with_flush(true); // TERMINATE response
 
     float elapsed = (float) (clock() - start) / CLOCKS_PER_SEC;
     snprintf(trusted_utils_msgstr, 512, "cpu:%.3f prod:%lu imp:%lu del:%lu", elapsed, nb_produced, nb_imported, nb_deleted);
@@ -254,7 +266,7 @@ void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
   assert((long)(nb_lits * sizeof(int)) <= alen);
 
   if (trusted) {
-      if (last_was_simulated) {
+      if (last_cls_data) {
           memcpy(a, last_cls_data, nb_lits * sizeof(int));
       } else {
           // Read literals into buf_lits (for fficallback), then copy to CakeML
@@ -282,17 +294,27 @@ void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
 }
 
 // fficallback: CakeML reports result, C performs I/O response.
-// c[0]: result byte (0 = error, nonzero = ok)
+// c[0]: result byte ('0' = error, nonzero = ok)
+// c[1..clen-1]: error message from CakeML (if any)
 // a: the same 17-byte step header from ffistep
 // buf_lits is guaranteed to contain the clause for PRODUCE and IMPORT
 void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
-  (void)clen; (void)alen;
-  assert(clen == 1);
+  (void)alen;
+  assert(clen >= 1);
   assert(alen == 17);
 
-  if (last_was_simulated) return; // no-op (simulated import phase)
+  bool cml_ok = c[0] != '0';
+  if (!cml_ok && clen > 1) {
+      // Copy CakeML error message into trusted_utils_msgstr
+      long msglen = clen - 1;
+      if (msglen > 511) msglen = 511;
+      memcpy(trusted_utils_msgstr, &c[1], msglen);
+      trusted_utils_msgstr[msglen] = '\0';
+  }
+  all_ok = cml_ok && all_ok;
 
-  bool res = c[0];
+  if (!last_cls_data) {
+
   int directive = a[0];
 
   if (directive == TRUSTED_CHK_CLS_PRODUCE) {
@@ -300,7 +322,8 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
       const bool share = trusted_utils_read_bool(input);
 
       // CakeML handles RUP checking; C computes signature if sharing
-      if (share) {
+      // Only need to compute signature if in a valid state
+      if (all_ok && share) {
           u64 id;
           memcpy(&id, &a[1], sizeof(u64));
           int nb_lits;
@@ -308,7 +331,7 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
           compute_clause_signature(id, buf_lits->data, nb_lits, buf_sig);
       }
 
-      say(res);
+      say(all_ok);
       if (share) trusted_utils_write_sig(buf_sig, output);
 #if IMPCHECK_FLUSH_ALWAYS
       UNLOCKED_IO(fflush)(output);
@@ -323,34 +346,45 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
       memcpy(&nb_lits, &a[1 + sizeof(u64)], sizeof(int));
 
       trusted_utils_read_sig(buf_sig, input);
-      bool res = top_check_import(id, buf_lits->data, nb_lits, buf_sig);
-      say(res);
+      signature computed_sig;
+      compute_clause_signature(id, buf_lits->data, nb_lits, computed_sig);
+      if (!trusted_utils_equal_signatures(buf_sig, computed_sig)) {
+          snprintf(trusted_utils_msgstr, 512, "Signature check of clause %lu failed", id);
+          all_ok = false;
+      }
+      say(all_ok);
       nb_imported++;
 
   } else if (directive == TRUSTED_CHK_CLS_DELETE) {
 
       int nb_hints;
       memcpy(&nb_hints, &a[1], sizeof(int));
-      say(res);
+      say(all_ok);
       nb_deleted += nb_hints;
 
   } else if (directive == TRUSTED_CHK_VALIDATE_UNSAT) {
 
       // CakeML checks empty clause; C computes result signature
-      confirm_result(formula_sig, 20, buf_sig);
-      say(res);
+      if (all_ok) confirm_result(formula_sig, 20, buf_sig);
+      say(all_ok);
       trusted_utils_write_sig(buf_sig, output);
       UNLOCKED_IO(fflush)(output);
-      if (res) trusted_utils_log("UNSAT validated");
+      if (all_ok) trusted_utils_log("UNSAT validated");
 
-  } else if (directive == TRUSTED_CHK_TERMINATE) {
-
-      say_with_flush(true);
   }
+
+  } // end if (!last_cls_data)
 
 #if IMPCHECK_WRITE_DIRECTIVES
   writer_flush();
 #endif
+
+  if (MALLOB_UNLIKELY(!all_ok)) {
+      if (!reported_error) {
+          trusted_utils_log_err(trusted_utils_msgstr);
+          reported_error = true;
+      }
+  }
 }
 
 // ffistep: CakeML calls this to get the header for the next instruction
@@ -379,8 +413,6 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
       // store pointer for fficlause to copy from
       last_cls_data = cls;
-      last_was_simulated = true;
-
       // Header layout: [type(1) | id(8) | nb_lits(4)]
       a[0] = TRUSTED_CHK_CLS_IMPORT;
       memcpy(&a[1], &id, sizeof(id));
@@ -391,7 +423,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
   }
 
   // Regular phase: parse directive from pipe.
-  last_was_simulated = false;
+  last_cls_data = NULL;
   int c = trusted_utils_read_char(input);
   a[0] = c; // Pass the initial character to CakeML
 
@@ -422,7 +454,13 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       const int nb_hints = trusted_utils_read_int(input);
 
       memcpy(&a[1], &nb_hints, sizeof(nb_hints));
+
+  } else if (c == TRUSTED_CHK_VALIDATE_SAT) {
+      trusted_utils_log_err("SAT validation (M) not supported with CakeML");
+  } else if (c != TRUSTED_CHK_VALIDATE_UNSAT && c != TRUSTED_CHK_TERMINATE) {
+      snprintf(trusted_utils_msgstr, sizeof(trusted_utils_msgstr),
+               "Invalid directive in ffistep: '%c' (%d)", c, c);
+      trusted_utils_log_err(trusted_utils_msgstr);
   }
-  // VALIDATE_UNSAT, TERMINATE: no payload to parse
 }
 
