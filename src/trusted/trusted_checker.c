@@ -51,7 +51,7 @@ extern struct hash_table* clause_table;
 extern u64 nb_loaded_clauses;
 
 /* exported in cake.S */
-extern void cml_main(void);
+extern int cml_main(void);
 extern void *cml_heap;
 extern void *cml_stack;
 extern void *cml_stackend;
@@ -102,6 +102,7 @@ bool reported_error;
 // State passed from ffistep to other FFIs
 u64 fake_import_id;      // Next clause ID to replay in import phase
 int* last_cls_data;      // non-NULL during simulated import phase
+int last_nb_lits;        // Expected clause size for next fficlause call
 
 int tc_run(bool check_model, bool lenient) {
     clock_t start = clock();
@@ -186,7 +187,12 @@ int tc_run(bool check_model, bool lenient) {
 
     all_ok = top_check_valid();
     fake_import_id = 1;
-    cml_main(); // Passing main loop control to CakeML
+    int cml_ret = cml_main(); // Passing main loop control to CakeML
+    if (cml_ret != 0) {
+        snprintf(trusted_utils_msgstr, 512, "CakeML exited with code %d", cml_ret);
+        trusted_utils_log_err(trusted_utils_msgstr);
+        all_ok = false;
+    }
 
     say_with_flush(true); // TERMINATE response
 
@@ -263,6 +269,7 @@ void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
   bool trusted = c[0];
   int nb_lits;
   memcpy(&nb_lits, &c[1], sizeof(int));
+  assert(nb_lits == last_nb_lits);
   assert((long)(nb_lits * sizeof(int)) <= alen);
 
   if (trusted) {
@@ -413,6 +420,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
       // store pointer for fficlause to copy from
       last_cls_data = cls;
+      last_nb_lits = nb_lits;
       // Header layout: [type(1) | id(8) | nb_lits(4)]
       a[0] = TRUSTED_CHK_CLS_IMPORT;
       memcpy(&a[1], &id, sizeof(id));
@@ -434,6 +442,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       const int nb_lits = trusted_utils_read_int(input);
       read_literals(nb_lits);
       const int nb_hints = trusted_utils_read_int(input);
+      last_nb_lits = nb_lits;
 
       memcpy(&a[1], &id, sizeof(id));
       memcpy(&a[1 + sizeof(id)], &nb_lits, sizeof(nb_lits));
@@ -444,6 +453,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       // Header layout: [type(1) | id(8) | nb_lits(4)]
       const u64 id = trusted_utils_read_ul(input);
       const int nb_lits = trusted_utils_read_int(input);
+      last_nb_lits = nb_lits;
 
       memcpy(&a[1], &id, sizeof(id));
       memcpy(&a[1 + sizeof(id)], &nb_lits, sizeof(nb_lits));
