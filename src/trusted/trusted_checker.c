@@ -114,8 +114,8 @@ int tc_run(bool check_model, bool lenient) {
 
     // TODO: use ImpCheck's command line to set these
     unsigned long sz = 1024*1024; // 1 MB unit
-    unsigned long cml_heap_sz = 1024 * sz;    // Default: 1 GB heap
-    unsigned long cml_stack_sz = 1024 * sz;   // Default: 1 GB stack
+    unsigned long cml_heap_sz = 768 * sz;    // Default: 1 GB heap
+    unsigned long cml_stack_sz = 20 * sz;   // Default: 1 GB stack
 
     // Min sizes for CML heap and stack
     if(cml_heap_sz < sz || cml_stack_sz < sz || cml_heap_sz + cml_stack_sz < 8192)
@@ -428,6 +428,12 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
       fake_import_id++;
       return;
+  }
+
+  // All original problem clauses have been imported: Delete entire clause table
+  if (clause_table) {
+    hash_table_free(clause_table, true);
+    clause_table = 0;
   }
 
   // Regular phase: parse directive from pipe.

@@ -48,7 +48,7 @@ void test_small() {
     do_assert(ht->size == 0);
     do_assert(hash_table_find(ht, 40) == 0);
 
-    hash_table_free(ht);
+    hash_table_free(ht, false);
 
     printf("[TEST] ---  end  test_small() ---\n\n");
 }
@@ -84,7 +84,7 @@ void test_big() {
     }
     do_assert(ht->size == 0);
 
-    hash_table_free(ht);
+    hash_table_free(ht, false);
 
     printf("[TEST] ---  end  test_big() ---\n\n");
 }
