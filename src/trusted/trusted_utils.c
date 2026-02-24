@@ -20,10 +20,14 @@ void trusted_utils_log_err(const char* msg) {
 
 void trusted_utils_exit_eof(void) {
     trusted_utils_log("end-of-file - terminating");
+    fflush(stdout);
+    fflush(stderr);
     exit(0);
 }
 void exit_oom(void) {
     trusted_utils_log("allocation failed - terminating");
+    fflush(stdout);
+    fflush(stderr);
     exit(0);
 }
 

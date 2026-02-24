@@ -20,6 +20,9 @@ extern void compute_clause_signature(u64 id, const int* lits, int nb_lits, u8* o
 #include "../writer.h"
 #endif
 
+// Use this line to produce a text file qualified by the PID
+// that logs all ffi calls.
+// #define IMPCHECK_DEBUG_FILE
 
 // Instantiate int_vec
 #define TYPE int
@@ -47,7 +50,7 @@ struct int_vec* buf_lits;
 // struct u64_vec* buf_hints;
 
 /* from lrat_check.c */
-extern struct hash_table* clause_table;
+extern struct u64_vec* orig_clauses;
 extern u64 nb_loaded_clauses;
 
 /* exported in cake.S */
@@ -60,6 +63,10 @@ extern void *cml_stackend;
 extern char cake_text_begin;
 extern char cake_codebuffer_begin;
 extern char cake_codebuffer_end;
+
+#ifdef IMPCHECK_DEBUG_FILE
+FILE* f_dbg;
+#endif
 
 void say(bool ok) {
 #if IMPCHECK_WRITE_DIRECTIVES
@@ -104,6 +111,12 @@ u64 fake_import_id;      // Next clause ID to replay in import phase
 int* last_cls_data;      // non-NULL during simulated import phase
 int last_nb_lits;        // Expected clause size for next fficlause call
 
+void print_stats_at_exit(clock_t start) {
+    float elapsed = (float) (clock() - start) / CLOCKS_PER_SEC;
+    snprintf(trusted_utils_msgstr, 512, "cpu:%.3f prod:%lu imp:%lu del:%lu", elapsed, nb_produced, nb_imported, nb_deleted);
+    trusted_utils_log(trusted_utils_msgstr);
+}
+
 int tc_run(bool check_model, bool lenient) {
     clock_t start = clock();
     nb_produced = 0;
@@ -114,8 +127,8 @@ int tc_run(bool check_model, bool lenient) {
 
     // TODO: use ImpCheck's command line to set these
     unsigned long sz = 1024*1024; // 1 MB unit
-    unsigned long cml_heap_sz = 768 * sz;    // Default: 1 GB heap
-    unsigned long cml_stack_sz = 20 * sz;   // Default: 1 GB stack
+    unsigned long cml_heap_sz = 2048 * sz;    // Default: 1 GB heap
+    unsigned long cml_stack_sz = 32 * sz;   // Default: 1 GB stack
 
     // Min sizes for CML heap and stack
     if(cml_heap_sz < sz || cml_stack_sz < sz || cml_heap_sz + cml_stack_sz < 8192)
@@ -165,8 +178,15 @@ int tc_run(bool check_model, bool lenient) {
 
             say_with_flush(top_check_end_load());
 
+        } else if (c == TRUSTED_CHK_TERMINATE) {
+
+            say_with_flush(true); // TERMINATE response
+            print_stats_at_exit(start);
+            exit(0);
+
         } else {
-            trusted_utils_log_err("Invalid directive during formula loading!");
+            snprintf(trusted_utils_msgstr, 512, "Invalid directive \"%c\" (%i) during formula loading!", c, c);
+            trusted_utils_log_err(trusted_utils_msgstr);
             break;
         }
 
@@ -187,19 +207,29 @@ int tc_run(bool check_model, bool lenient) {
 
     all_ok = top_check_valid();
     fake_import_id = 1;
+
+#ifdef IMPCHECK_DEBUG_FILE
+    char fname_dbg[512];
+    fname_dbg[511] = '\0';
+    snprintf(fname_dbg, 511, "impchkdbg.%i", getpid());
+    f_dbg = fopen(fname_dbg, "w");
+#endif
+
+    // *************************************************************
     int cml_ret = cml_main(); // Passing main loop control to CakeML
+    // *************************************************************
+
+#ifdef IMPCHECK_DEBUG_FILE
+    fprintf(f_dbg, "END OF MAIN ret=%i\n", cml_ret); fflush(f_dbg);
+#endif
     if (cml_ret != 0) {
         snprintf(trusted_utils_msgstr, 512, "CakeML exited with code %d", cml_ret);
-        trusted_utils_log_err(trusted_utils_msgstr);
+        trusted_utils_log(trusted_utils_msgstr);
         all_ok = false;
     }
 
     say_with_flush(true); // TERMINATE response
-
-    float elapsed = (float) (clock() - start) / CLOCKS_PER_SEC;
-    snprintf(trusted_utils_msgstr, 512, "cpu:%.3f prod:%lu imp:%lu del:%lu", elapsed, nb_produced, nb_imported, nb_deleted);
-    trusted_utils_log(trusted_utils_msgstr);
-
+    print_stats_at_exit(start);
     return 0;
 }
 
@@ -244,6 +274,9 @@ void int_to_byte2(int i, unsigned char *b){
 
 void ffiwrite (unsigned char *c, long clen, unsigned char *a, long alen){
   (void)clen; (void)alen;
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "ffiwrite\n"); fflush(f_dbg);
+#endif
   assert(clen == 8);
   int fd = byte8_to_int(c);
   int n = byte2_to_int(a);
@@ -265,6 +298,9 @@ void ffiwrite (unsigned char *c, long clen, unsigned char *a, long alen){
 void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
   (void)clen; (void)alen;
   assert(clen == 5);
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "fficlause\n"); fflush(f_dbg);
+#endif
 
   bool trusted = c[0];
   int nb_lits;
@@ -284,6 +320,9 @@ void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
       // Untrusted clause literals already read by ffistep into buf_lits
       memcpy(a, buf_lits->data, nb_lits * sizeof(int));
   }
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "- ret\n"); fflush(f_dbg);
+#endif
 }
 
 // ffihints: CakeML calls this to fetch the next hint
@@ -291,6 +330,9 @@ void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
 void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
   (void)clen; (void)alen;
   assert(clen == 4);
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "ffihints\n"); fflush(f_dbg);
+#endif
 
   int nb_hints;
   memcpy(&nb_hints, c, sizeof(int));
@@ -323,6 +365,9 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
   if (!last_cls_data) {
 
   int directive = a[0];
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "fficallback %c\n", (char)directive); fflush(f_dbg);
+#endif
 
   if (directive == TRUSTED_CHK_CLS_PRODUCE) {
 
@@ -404,15 +449,19 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
   (void)empty; (void)clen; (void)alen;
   assert(clen == 0);
   assert(alen == 17);
+
   // 1 byte for initial step symbol
   // max of 1 + 8 + 4 + 4 for TRUSTED_CHK_CLS_PRODUCE
 
   // Simulated import phase: replay loaded formula clauses to CakeML
   // as import steps.
   if (fake_import_id <= nb_loaded_clauses) {
+#ifdef IMPCHECK_DEBUG_FILE
+      fprintf(f_dbg, "ffistep (pre) %lu\n", fake_import_id); fflush(f_dbg);
+#endif
 
       const u64 id = fake_import_id;
-      int* cls = (int*) hash_table_find(clause_table, id);
+      int* cls = *(int**)& orig_clauses->data[id - 1];
 
       // count literals (always zero-terminated)
       int nb_lits = 0;
@@ -431,15 +480,20 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
   }
 
   // All original problem clauses have been imported: Delete entire clause table
-  if (clause_table) {
-    hash_table_free(clause_table, true);
-    clause_table = 0;
+  if (orig_clauses) {
+    for (u64 i = 0; i < orig_clauses->size; i++) free((int*) orig_clauses->data[i]);
+    u64_vec_free(orig_clauses);
+    orig_clauses = 0;
   }
 
   // Regular phase: parse directive from pipe.
   last_cls_data = NULL;
   int c = trusted_utils_read_char(input);
   a[0] = c; // Pass the initial character to CakeML
+
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "ffistep (post) %c\n", c); fflush(f_dbg);
+#endif
 
   if (c == TRUSTED_CHK_CLS_PRODUCE) {
 
@@ -473,6 +527,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
   } else if (c == TRUSTED_CHK_VALIDATE_SAT) {
       trusted_utils_log_err("SAT validation (M) not supported with CakeML");
+
   } else if (c != TRUSTED_CHK_VALIDATE_UNSAT && c != TRUSTED_CHK_TERMINATE) {
       snprintf(trusted_utils_msgstr, sizeof(trusted_utils_msgstr),
                "Invalid directive in ffistep: '%c' (%d)", c, c);

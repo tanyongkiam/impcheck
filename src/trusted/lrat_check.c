@@ -20,9 +20,18 @@
 #undef TYPED
 #undef TYPE
 
+// Instantiate u64_vec
+#define TYPE u64
+#define TYPED(THING) u64_ ## THING
+#include "vec.h"
+#undef TYPED
+#undef TYPE
+
 // The hash table where we keep all clauses and which uses most of our RAM.
 // We still use a power-of-two growth policy since this makes lookups faster.
 struct hash_table* clause_table;
+
+struct u64_vec* orig_clauses;
 
 // Table of all variables with their current assignment (-1/0/1).
 // We perform all LRUP checks using one big vector of all variable polarities,
@@ -171,26 +180,25 @@ bool lrat_check_add_axiomatic_clause(u64 id, const int* lits, int nb_lits) {
 }
 
 void lrat_check_init(int nb_vars, bool opt_check_model, bool opt_lenient) {
-    clause_table = hash_table_init(16);
+    //clause_table = hash_table_init(16);
+    orig_clauses = u64_vec_init(4096);
     clause_to_add = int_vec_init(512);
-    var_values = i8_vec_init(nb_vars+1);
-    assigned_units = int_vec_init(512);
+    //var_values = i8_vec_init(nb_vars+1);
+    //assigned_units = int_vec_init(512);
     check_model = opt_check_model;
     lenient = opt_lenient;
 }
 
 bool lrat_check_load(int lit) {
+    int_vec_push(clause_to_add, lit);
     if (lit == 0) {
-        if (!lrat_check_add_axiomatic_clause(id_to_add, clause_to_add->data, clause_to_add->size)) {
-            return false;
-        }
+        int* c = clause_init(clause_to_add->data, clause_to_add->size);
+        u64_vec_push(orig_clauses, *(u64*)&c);
         id_to_add++;
-        int_vec_push(clause_to_add, 0);
         siphash_update((u8*) clause_to_add->data, clause_to_add->size*sizeof(int));
         int_vec_clear(clause_to_add);
         return true;
     }
-    int_vec_push(clause_to_add, lit);
     return true;
 }
 
