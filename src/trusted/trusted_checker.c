@@ -11,7 +11,7 @@
 
 #include <assert.h>         // asserts
 #include <unistd.h>         // for write
-#include "hash.h"           // for hash_table_find
+#include "hash_32.h"           // for hash_table_find
 
 /* from top_check.c */
 extern void compute_clause_signature(u64 id, const int* lits, int nb_lits, u8* out);
@@ -27,6 +27,13 @@ extern void compute_clause_signature(u64 id, const int* lits, int nb_lits, u8* o
 // Instantiate int_vec
 #define TYPE int
 #define TYPED(THING) int_ ## THING
+#include "vec.h"
+#undef TYPED
+#undef TYPE
+
+// Instantiate u32_vec
+#define TYPE u32
+#define TYPED(THING) u32_ ## THING
 #include "vec.h"
 #undef TYPED
 #undef TYPE
@@ -48,6 +55,10 @@ bool do_logging = true;
 signature buf_sig;
 struct int_vec* buf_lits;
 // struct u64_vec* buf_hints;
+
+struct hash_table_32* id_table;
+struct u32_vec* id_queue;
+int next_id_to_allocate;
 
 /* from lrat_check.c */
 extern struct u64_vec* orig_clauses;
@@ -93,9 +104,14 @@ void tc_init(const char* fifo_in, const char* fifo_out) {
     output = fopen(fifo_out, "w");
     if (!output) trusted_utils_exit_eof();
     buf_lits = int_vec_init(1 << 14);
+    id_table = hash_table_32_init(10);
+    id_queue = u32_vec_init(1024);
+    next_id_to_allocate = 1;
 }
 
 void tc_end(void) {
+    u32_vec_free(id_queue);
+    hash_table_32_free(id_table);
     int_vec_free(buf_lits);
     fclose(output);
     fclose(input);
@@ -107,7 +123,7 @@ bool all_ok;
 bool reported_error;
 
 // State passed from ffistep to other FFIs
-u64 fake_import_id;      // Next clause ID to replay in import phase
+u32 fake_import_id;      // Next clause ID to replay in import phase
 int* last_cls_data;      // non-NULL during simulated import phase
 int last_nb_lits;        // Expected clause size for next fficlause call
 
@@ -115,6 +131,32 @@ void print_stats_at_exit(clock_t start) {
     float elapsed = (float) (clock() - start) / CLOCKS_PER_SEC;
     snprintf(trusted_utils_msgstr, 512, "cpu:%.3f prod:%lu imp:%lu del:%lu", elapsed, nb_produced, nb_imported, nb_deleted);
     trusted_utils_log(trusted_utils_msgstr);
+}
+
+u32 external_to_internal_id(u64 eid) {
+  u32 iid;
+  if (id_queue->size == 0) {
+    // allocate a new ID
+    iid = next_id_to_allocate;
+    next_id_to_allocate += 1;
+  } else {
+    // remove a previous ID from the queue
+    iid = id_queue->data[id_queue->size - 1];
+    id_queue->size--;
+  }
+  // remember the mapping!
+  bool ok = hash_table_32_insert(id_table, eid, iid);
+  assert(ok);
+  return iid;
+}
+void free_id(u64 eid) {
+  // delete mapping from the table
+  u32 iid = hash_table_32_find(id_table, eid);
+  assert(iid);
+  bool ok = hash_table_32_delete_last_found(id_table);
+  assert(ok);
+  // push the now unused ID to the queue
+  u32_vec_push(id_queue, iid);
 }
 
 int tc_run(bool check_model, bool lenient, long producer_id, long producer_count) {
