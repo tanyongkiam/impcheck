@@ -43,6 +43,9 @@ bool begins_with(const char* str, const char* prefix) {
 void trusted_utils_try_match_arg(const char* arg, const char* opt, const char** out) {
     if (begins_with(arg, opt)) *out = arg+strlen(opt);
 }
+void trusted_utils_try_match_long(const char* arg, const char* opt, long* out) {
+    if (begins_with(arg, opt)) *out = atol(arg+strlen(opt));
+}
 void trusted_utils_try_match_flag(const char* arg, const char* opt, bool* out) {
     if (begins_with(arg, opt)) *out = true;
 }

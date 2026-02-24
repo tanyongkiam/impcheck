@@ -117,7 +117,7 @@ void print_stats_at_exit(clock_t start) {
     trusted_utils_log(trusted_utils_msgstr);
 }
 
-int tc_run(bool check_model, bool lenient) {
+int tc_run(bool check_model, bool lenient, long producer_id, long producer_count) {
     clock_t start = clock();
     nb_produced = 0;
     nb_imported = 0;
