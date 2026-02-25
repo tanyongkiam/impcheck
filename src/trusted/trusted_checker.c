@@ -126,7 +126,8 @@ bool reported_error;
 
 void print_stats_at_exit(clock_t start) {
     float elapsed = (float) (clock() - start) / CLOCKS_PER_SEC;
-    snprintf(trusted_utils_msgstr, 512, "cpu:%.3f prod:%lu imp:%lu del:%lu", elapsed, nb_produced, nb_imported, nb_deleted);
+    snprintf(trusted_utils_msgstr, 512, "cpu:%.3f prod:%lu imp:%lu del:%lu maxid=%lu",
+      elapsed, nb_produced, nb_imported, nb_deleted, next_id_to_allocate-1);
     trusted_utils_log(trusted_utils_msgstr);
 }
 
