@@ -11,7 +11,7 @@
 
 #include <assert.h>         // asserts
 #include <unistd.h>         // for write
-#include "hash_32.h"           // for hash_table_find
+#include "hash.h"              // for hash_table_find
 
 /* from top_check.c */
 extern void compute_clause_signature(u64 id, const int* lits, int nb_lits, u8* out);
@@ -27,13 +27,6 @@ extern void compute_clause_signature(u64 id, const int* lits, int nb_lits, u8* o
 // Instantiate int_vec
 #define TYPE int
 #define TYPED(THING) int_ ## THING
-#include "vec.h"
-#undef TYPED
-#undef TYPE
-
-// Instantiate u32_vec
-#define TYPE u32
-#define TYPED(THING) u32_ ## THING
 #include "vec.h"
 #undef TYPED
 #undef TYPE
@@ -54,11 +47,18 @@ bool do_logging = true;
 
 signature buf_sig;
 struct int_vec* buf_lits;
-// struct u64_vec* buf_hints;
 
-struct hash_table_32* id_table;
-struct u32_vec* id_queue;
-int next_id_to_allocate;
+// State passed from ffistep to other FFIs
+u64 fake_import_id;      // Next clause ID to replay in import phase
+u64 last_eid;            // External ID from most recent ffistep
+struct u64_vec* last_hints; // External hint IDs from most recent ffihints
+int* last_cls_data;      // non-NULL during simulated import phase
+int last_nb_lits;        // Expected clause size for next fficlause call
+
+struct hash_table* id_table;
+struct u64_vec* id_queue;
+u64 next_id_to_allocate;
+u64 max_eid;
 
 /* from lrat_check.c */
 extern struct u64_vec* orig_clauses;
@@ -104,14 +104,16 @@ void tc_init(const char* fifo_in, const char* fifo_out) {
     output = fopen(fifo_out, "w");
     if (!output) trusted_utils_exit_eof();
     buf_lits = int_vec_init(1 << 14);
-    id_table = hash_table_32_init(10);
-    id_queue = u32_vec_init(1024);
+    last_hints = u64_vec_init(1 << 10);
+    id_table = hash_table_init(10);
+    id_queue = u64_vec_init(1024);
     next_id_to_allocate = 1;
 }
 
 void tc_end(void) {
-    u32_vec_free(id_queue);
-    hash_table_32_free(id_table);
+    u64_vec_free(id_queue);
+    hash_table_free(id_table, false);
+    u64_vec_free(last_hints);
     int_vec_free(buf_lits);
     fclose(output);
     fclose(input);
@@ -122,19 +124,19 @@ u64 nb_produced, nb_imported, nb_deleted;
 bool all_ok;
 bool reported_error;
 
-// State passed from ffistep to other FFIs
-u32 fake_import_id;      // Next clause ID to replay in import phase
-int* last_cls_data;      // non-NULL during simulated import phase
-int last_nb_lits;        // Expected clause size for next fficlause call
-
 void print_stats_at_exit(clock_t start) {
     float elapsed = (float) (clock() - start) / CLOCKS_PER_SEC;
     snprintf(trusted_utils_msgstr, 512, "cpu:%.3f prod:%lu imp:%lu del:%lu", elapsed, nb_produced, nb_imported, nb_deleted);
     trusted_utils_log(trusted_utils_msgstr);
 }
 
-u32 external_to_internal_id(u64 eid) {
-  u32 iid;
+u64 external_to_internal_id(u64 eid) {
+  // check if already mapped
+  u64 existing = (u64)hash_table_find(id_table, eid);
+  if (existing) return existing;
+  if (eid > max_eid) max_eid = eid;
+  // allocate a new internal ID
+  u64 iid;
   if (id_queue->size == 0) {
     // allocate a new ID
     iid = next_id_to_allocate;
@@ -145,18 +147,18 @@ u32 external_to_internal_id(u64 eid) {
     id_queue->size--;
   }
   // remember the mapping!
-  bool ok = hash_table_32_insert(id_table, eid, iid);
+  bool ok = hash_table_insert(id_table, eid, (void*)iid);
   assert(ok);
   return iid;
 }
 void free_id(u64 eid) {
   // delete mapping from the table
-  u32 iid = hash_table_32_find(id_table, eid);
+  u64 iid = (u64)hash_table_find(id_table, eid);
   assert(iid);
-  bool ok = hash_table_32_delete_last_found(id_table);
+  bool ok = hash_table_delete_last_found(id_table);
   assert(ok);
   // push the now unused ID to the queue
-  u32_vec_push(id_queue, iid);
+  u64_vec_push(id_queue, iid);
 }
 
 int tc_run(bool check_model, bool lenient, long producer_id, long producer_count) {
@@ -380,8 +382,13 @@ void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
   memcpy(&nb_hints, c, sizeof(int));
   assert((long)(nb_hints * sizeof(u64)) <= alen);
 
-  // Read hints directly into CakeML's array
-  trusted_utils_read_uls((u64*)a, nb_hints, input);
+  // Read external hints, save originals, write internal IDs to CakeML's array
+  u64_vec_reserve(last_hints, nb_hints);
+  trusted_utils_read_uls(last_hints->data, nb_hints, input);
+  last_hints->size = nb_hints;
+  for (int i = 0; i < nb_hints; i++) {
+    ((u64*)a)[i] = external_to_internal_id(last_hints->data[i]);
+  }
 }
 
 // fficallback: CakeML reports result, C performs I/O response.
@@ -418,11 +425,7 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
       // CakeML handles RUP checking; C computes signature if sharing
       // Only need to compute signature if in a valid state
       if (all_ok && share) {
-          u64 id;
-          memcpy(&id, &a[1], sizeof(u64));
-          int nb_lits;
-          memcpy(&nb_lits, &a[1 + sizeof(u64)], sizeof(int));
-          compute_clause_signature(id, buf_lits->data, nb_lits, buf_sig);
+          compute_clause_signature(last_eid, buf_lits->data, last_nb_lits, buf_sig);
       }
 
       say(all_ok);
@@ -434,16 +437,11 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
 
   } else if (directive == TRUSTED_CHK_CLS_IMPORT) {
 
-      u64 id;
-      memcpy(&id, &a[1], sizeof(u64));
-      int nb_lits;
-      memcpy(&nb_lits, &a[1 + sizeof(u64)], sizeof(int));
-
       trusted_utils_read_sig(buf_sig, input);
       signature computed_sig;
-      compute_clause_signature(id, buf_lits->data, nb_lits, computed_sig);
+      compute_clause_signature(last_eid, buf_lits->data, last_nb_lits, computed_sig);
       if (!trusted_utils_equal_signatures(buf_sig, computed_sig)) {
-          snprintf(trusted_utils_msgstr, 512, "Signature check of clause %lu failed", id);
+          snprintf(trusted_utils_msgstr, 512, "Signature check of clause %lu failed", last_eid);
           all_ok = false;
       }
       say(all_ok);
@@ -451,10 +449,12 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
 
   } else if (directive == TRUSTED_CHK_CLS_DELETE) {
 
-      int nb_hints;
-      memcpy(&nb_hints, &a[1], sizeof(int));
+      // Free internal IDs for each deleted clause
+      for (u64 i = 0; i < last_hints->size; i++) {
+          free_id(last_hints->data[i]);
+      }
       say(all_ok);
-      nb_deleted += nb_hints;
+      nb_deleted += last_hints->size;
 
   } else if (directive == TRUSTED_CHK_VALIDATE_UNSAT) {
 
@@ -502,8 +502,10 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       fprintf(f_dbg, "ffistep (pre) %lu\n", fake_import_id); fflush(f_dbg);
 #endif
 
-      const u64 id = fake_import_id;
-      int* cls = *(int**)& orig_clauses->data[id - 1];
+      const u64 eid = fake_import_id;
+      last_eid = eid;
+      const u64 iid = external_to_internal_id(eid);
+      int* cls = *(int**)& orig_clauses->data[eid - 1];
 
       // count literals (always zero-terminated)
       int nb_lits = 0;
@@ -512,10 +514,10 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       // store pointer for fficlause to copy from
       last_cls_data = cls;
       last_nb_lits = nb_lits;
-      // Header layout: [type(1) | id(8) | nb_lits(4)]
+      // Header layout: [type(1) | iid(8) | nb_lits(4)]
       a[0] = TRUSTED_CHK_CLS_IMPORT;
-      memcpy(&a[1], &id, sizeof(id));
-      memcpy(&a[1 + sizeof(id)], &nb_lits, sizeof(nb_lits));
+      memcpy(&a[1], &iid, sizeof(iid));
+      memcpy(&a[1 + sizeof(iid)], &nb_lits, sizeof(nb_lits));
 
       fake_import_id++;
       return;
@@ -539,26 +541,30 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
   if (c == TRUSTED_CHK_CLS_PRODUCE) {
 
-      // Header layout: [type(1) | id(8) | nb_lits(4) | nb_hints(4)]
-      const u64 id = trusted_utils_read_ul(input);
+      // Header layout: [type(1) | iid(8) | nb_lits(4) | nb_hints(4)]
+      const u64 eid = trusted_utils_read_ul(input);
+      last_eid = eid;
+      const u64 iid = external_to_internal_id(eid);
       const int nb_lits = trusted_utils_read_int(input);
       read_literals(nb_lits);
       const int nb_hints = trusted_utils_read_int(input);
       last_nb_lits = nb_lits;
 
-      memcpy(&a[1], &id, sizeof(id));
-      memcpy(&a[1 + sizeof(id)], &nb_lits, sizeof(nb_lits));
-      memcpy(&a[1 + sizeof(id) + sizeof(nb_lits)], &nb_hints, sizeof(nb_hints));
+      memcpy(&a[1], &iid, sizeof(iid));
+      memcpy(&a[1 + sizeof(iid)], &nb_lits, sizeof(nb_lits));
+      memcpy(&a[1 + sizeof(iid) + sizeof(nb_lits)], &nb_hints, sizeof(nb_hints));
 
   } else if (c == TRUSTED_CHK_CLS_IMPORT) {
 
-      // Header layout: [type(1) | id(8) | nb_lits(4)]
-      const u64 id = trusted_utils_read_ul(input);
+      // Header layout: [type(1) | iid(8) | nb_lits(4)]
+      const u64 eid = trusted_utils_read_ul(input);
+      last_eid = eid;
+      const u64 iid = external_to_internal_id(eid);
       const int nb_lits = trusted_utils_read_int(input);
       last_nb_lits = nb_lits;
 
-      memcpy(&a[1], &id, sizeof(id));
-      memcpy(&a[1 + sizeof(id)], &nb_lits, sizeof(nb_lits));
+      memcpy(&a[1], &iid, sizeof(iid));
+      memcpy(&a[1 + sizeof(iid)], &nb_lits, sizeof(nb_lits));
 
   } else if (c == TRUSTED_CHK_CLS_DELETE) {
 
