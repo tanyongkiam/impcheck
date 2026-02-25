@@ -162,7 +162,7 @@ void free_id(u64 eid) {
   u64_vec_push(id_queue, iid);
 }
 
-int tc_run(bool check_model, bool lenient, long producer_id, long producer_count) {
+int tc_run(bool check_model, bool lenient, long producer_id, long producer_count, int heap_megabytes) {
     clock_t start = clock();
     nb_produced = 0;
     nb_imported = 0;
@@ -172,8 +172,8 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 
     // TODO: use ImpCheck's command line to set these
     unsigned long sz = 1024*1024; // 1 MB unit
-    unsigned long cml_heap_sz = 2048 * sz;    // Default: 1 GB heap
-    unsigned long cml_stack_sz = 32 * sz;   // Default: 1 GB stack
+    unsigned long cml_heap_sz = heap_megabytes * sz;    // Default: 1 GB heap
+    unsigned long cml_stack_sz = 48 * sz;   // Default: 1 GB stack
 
     // Min sizes for CML heap and stack
     if(cml_heap_sz < sz || cml_stack_sz < sz || cml_heap_sz + cml_stack_sz < 8192)

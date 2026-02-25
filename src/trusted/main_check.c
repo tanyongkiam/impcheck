@@ -13,13 +13,14 @@ int main(int argc, char *argv[]) {
 
     const char *fifo_directives = "", *fifo_feedback = "", *seed_str = "0";
     bool check_model = false, lenient = false;
-    long producer_id = 0, producer_count = 0;
+    long producer_id = 0, producer_count = 0, heap_megabytes = 2048;
     for (int i = 1; i < argc; i++) {
         trusted_utils_try_match_arg(argv[i], "-fifo-directives=", &fifo_directives);
         trusted_utils_try_match_arg(argv[i], "-fifo-feedback=", &fifo_feedback);
         trusted_utils_try_match_arg(argv[i], "-key-seed=", &seed_str);
         trusted_utils_try_match_long(argv[i], "-producer-id=", &producer_id);
         trusted_utils_try_match_long(argv[i], "-producer-count=", &producer_count);
+        trusted_utils_try_match_long(argv[i], "-heap-mbs=", &heap_megabytes);
 
         trusted_utils_try_match_flag(argv[i], "-check-model", &check_model);
         trusted_utils_try_match_flag(argv[i], "-lenient", &lenient);
@@ -33,7 +34,7 @@ int main(int argc, char *argv[]) {
 #endif
 
     tc_init(fifo_directives, fifo_feedback);
-    int res = tc_run(check_model, lenient, producer_id, producer_count);
+    int res = tc_run(check_model, lenient, producer_id, producer_count, heap_megabytes);
     tc_end();
     fflush(stdout);
     return res;
