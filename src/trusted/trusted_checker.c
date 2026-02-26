@@ -54,6 +54,7 @@ u64 last_eid;            // External ID from most recent ffistep
 struct u64_vec* last_hints; // External hint IDs from most recent ffihints
 int* last_cls_data;      // non-NULL during simulated import phase
 int last_nb_lits;        // Expected clause size for next fficlause call
+int last_read_directive_char;
 
 struct hash_table* id_table;
 struct u64_vec* id_queue;
@@ -199,9 +200,19 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
     cml_stack = (char*)cml_heap + cml_heap_sz;
     cml_stackend = (char*)cml_stack + cml_stack_sz;
 
+#ifdef IMPCHECK_DEBUG_FILE
+    char fname_dbg[512];
+    fname_dbg[511] = '\0';
+    snprintf(fname_dbg, 511, "impchkdbg.%i", getpid());
+    f_dbg = fopen(fname_dbg, "w");
+#endif
+
     // Formula loading phase (INIT, LOAD, END_LOAD) handled in C
+    bool ended_loading = false;
+    all_ok = true;
     while (true) {
-        int c = trusted_utils_read_char(input);
+        last_read_directive_char = trusted_utils_read_char(input);
+        int c = last_read_directive_char;
         if (c == TRUSTED_CHK_INIT) {
 
             nb_vars = trusted_utils_read_int(input);
@@ -219,9 +230,37 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
             free(lits);
             // NO FEEDBACK
 
+        } else if (c == TRUSTED_CHK_CLS_DELETE) {
+            // We internally process deletion statements that come directly after loading
+            // since this can reduce the set of clauses forwarded to CakeML.
+
+            // Header layout: [type(1) | nb_hints(4)]
+            const int nb_hints = trusted_utils_read_int(input);
+            u64_vec_reserve(last_hints, nb_hints);
+            trusted_utils_read_uls(last_hints->data, nb_hints, input);
+            last_hints->size = nb_hints;
+            for (int i = 0; i < nb_hints; i++) {
+              u64 hint = last_hints->data[i];
+#ifdef IMPCHECK_DEBUG_FILE
+              fprintf(f_dbg, "delete cls %lu\n", hint); fflush(f_dbg);
+#endif
+              int* cls = (int*) orig_clauses->data[hint-1];
+              if (!cls) {
+                // ERROR - clause already deleted
+                snprintf(trusted_utils_msgstr, 512, "Cannot load deleted clause %lu!", hint);
+                trusted_utils_log_err(trusted_utils_msgstr);
+                all_ok = false;
+              } else {
+                free(cls);
+                orig_clauses->data[hint-1] = 0;
+              }
+            }
+            say(all_ok);
+
         } else if (c == TRUSTED_CHK_END_LOAD) {
 
             say_with_flush(top_check_end_load());
+            ended_loading = true;
 
         } else if (c == TRUSTED_CHK_TERMINATE) {
 
@@ -230,8 +269,10 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
             exit(0);
 
         } else {
-            snprintf(trusted_utils_msgstr, 512, "Invalid directive \"%c\" (%i) during formula loading!", c, c);
-            trusted_utils_log_err(trusted_utils_msgstr);
+            if (!ended_loading) {
+              snprintf(trusted_utils_msgstr, 512, "Invalid directive \"%c\" (%i) during formula loading!", c, c);
+              trusted_utils_log_err(trusted_utils_msgstr);
+            }
             break;
         }
 
@@ -245,20 +286,10 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
                 reported_error = true;
             }
         }
-
-        // breaking here to ensure same I/O behavior
-        if (c == TRUSTED_CHK_END_LOAD) break;
     }
 
     all_ok = top_check_valid();
     fake_import_id = 1;
-
-#ifdef IMPCHECK_DEBUG_FILE
-    char fname_dbg[512];
-    fname_dbg[511] = '\0';
-    snprintf(fname_dbg, 511, "impchkdbg.%i", getpid());
-    f_dbg = fopen(fname_dbg, "w");
-#endif
 
     // *************************************************************
     int cml_ret = cml_main(); // Passing main loop control to CakeML
@@ -416,7 +447,7 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
 
   int directive = a[0];
 #ifdef IMPCHECK_DEBUG_FILE
-  fprintf(f_dbg, "fficallback %c\n", (char)directive); fflush(f_dbg);
+  fprintf(f_dbg, "fficallback %c %i\n", (char)directive, all_ok?1:0); fflush(f_dbg);
 #endif
 
   if (directive == TRUSTED_CHK_CLS_PRODUCE) {
@@ -498,15 +529,25 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
   // Simulated import phase: replay loaded formula clauses to CakeML
   // as import steps.
-  if (fake_import_id <= nb_loaded_clauses) {
+  while (fake_import_id <= nb_loaded_clauses) {
+
+      const u64 eid = fake_import_id;
+      int* cls = *(int**)& orig_clauses->data[eid - 1];
+      if (!cls) {
+        // Clause was deleted: skip
+#ifdef IMPCHECK_DEBUG_FILE
+        fprintf(f_dbg, "skip deleted clause %lu\n", eid); fflush(f_dbg);
+#endif
+        fake_import_id++;
+        continue;
+      }
+
 #ifdef IMPCHECK_DEBUG_FILE
       fprintf(f_dbg, "ffistep (pre) %lu\n", fake_import_id); fflush(f_dbg);
 #endif
 
-      const u64 eid = fake_import_id;
       last_eid = eid;
       const u64 iid = external_to_internal_id(eid);
-      int* cls = *(int**)& orig_clauses->data[eid - 1];
 
       // count literals (always zero-terminated)
       int nb_lits = 0;
@@ -526,14 +567,20 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
   // All original problem clauses have been imported: Delete entire clause table
   if (orig_clauses) {
-    for (u64 i = 0; i < orig_clauses->size; i++) free((int*) orig_clauses->data[i]);
+    for (u64 i = 0; i < orig_clauses->size; i++) {
+      int* cls = (int*) orig_clauses->data[i];
+      if (cls) free(cls);
+    }
     u64_vec_free(orig_clauses);
     orig_clauses = 0;
   }
 
   // Regular phase: parse directive from pipe.
   last_cls_data = NULL;
-  int c = trusted_utils_read_char(input);
+  if (MALLOB_LIKELY(!last_read_directive_char))
+    last_read_directive_char = trusted_utils_read_char(input);
+  int c = last_read_directive_char;
+  last_read_directive_char = 0;
   a[0] = c; // Pass the initial character to CakeML
 
 #ifdef IMPCHECK_DEBUG_FILE
