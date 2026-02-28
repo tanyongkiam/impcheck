@@ -29,10 +29,13 @@ add_custom_command(
 )
 add_custom_target(rup_cml ALL DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.S)
 
+# This is the important one for verified checking 
 add_executable(impcheck_check
-    src/trusted/confirm.c src/trusted/hash.c src/trusted/lrat_check.c src/trusted/secret.c src/trusted/siphash.c src/trusted/trusted_checker.c src/trusted/top_check.c src/trusted/trusted_utils.c src/trusted/vectors.c src/writer.c
+    src/trusted/confirm.c src/trusted/hash.c src/trusted/secret.c src/trusted/siphash.c
+    src/trusted/trusted_checker.c src/trusted/trusted_utils.c src/trusted/vectors.c src/writer.c
     src/trusted/cakeml/cake_distrup.S
     src/trusted/main_check.c)
+
 add_executable(impcheck_confirm
     src/trusted/confirm.c src/trusted/hash.c src/trusted/secret.c src/trusted/siphash.c src/trusted/trusted_parser.c src/trusted/trusted_utils.c src/trusted/vectors.c src/writer.c 
     src/trusted/main_confirm.c)
