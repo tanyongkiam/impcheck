@@ -216,6 +216,12 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
         if (c == TRUSTED_CHK_INIT) {
 
             nb_vars = trusted_utils_read_int(input);
+            if (nb_vars < 0) {
+                snprintf(trusted_utils_msgstr, 512, "Negative nb_vars %d in INIT directive", nb_vars);
+                trusted_utils_log_err(trusted_utils_msgstr);
+                last_read_directive_char = TRUSTED_CHK_TERMINATE;
+                break;
+            }
             top_check_init(nb_vars, check_model, lenient);
             trusted_utils_read_sig(formula_sig, input);
             top_check_commit_formula_sig(formula_sig);
@@ -224,6 +230,12 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
         } else if (c == TRUSTED_CHK_LOAD) {
 
             const int nb_lits = trusted_utils_read_int(input);
+            if (nb_lits < 0) {
+                snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in LOAD directive", nb_lits);
+                trusted_utils_log_err(trusted_utils_msgstr);
+                last_read_directive_char = TRUSTED_CHK_TERMINATE;
+                break;
+            }
             int* lits = trusted_utils_malloc(nb_lits * sizeof(int));
             trusted_utils_read_ints(lits, nb_lits, input);
             for (int i = 0; i < nb_lits; i++) top_check_load(lits[i]);
@@ -236,6 +248,12 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 
             // Header layout: [type(1) | nb_hints(4)]
             const int nb_hints = trusted_utils_read_int(input);
+            if (nb_hints < 0) {
+                snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in DELETE directive", nb_hints);
+                trusted_utils_log_err(trusted_utils_msgstr);
+                last_read_directive_char = TRUSTED_CHK_TERMINATE;
+                break;
+            }
             u64_vec_reserve(last_hints, nb_hints);
             trusted_utils_read_uls(last_hints->data, nb_hints, input);
             last_hints->size = nb_hints;
@@ -381,6 +399,7 @@ void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
   bool trusted = c[0];
   int nb_lits;
   memcpy(&nb_lits, &c[1], sizeof(int));
+  assert(nb_lits >= 0);
   assert(nb_lits == last_nb_lits);
   assert((long)(nb_lits * sizeof(int)) <= alen);
 
@@ -412,6 +431,7 @@ void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
 
   int nb_hints;
   memcpy(&nb_hints, c, sizeof(int));
+  assert(nb_hints >= 0);
   assert((long)(nb_hints * sizeof(u64)) <= alen);
 
   // Read external hints, save originals, write internal IDs to CakeML's array
@@ -419,7 +439,8 @@ void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
   trusted_utils_read_uls(last_hints->data, nb_hints, input);
   last_hints->size = nb_hints;
   for (int i = 0; i < nb_hints; i++) {
-    ((u64*)a)[i] = external_to_internal_id(last_hints->data[i]);
+    u64 iid = external_to_internal_id(last_hints->data[i]);
+    memcpy(&a[i * sizeof(u64)], &iid, sizeof(u64));
   }
 }
 
@@ -594,8 +615,16 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       last_eid = eid;
       const u64 iid = external_to_internal_id(eid);
       const int nb_lits = trusted_utils_read_int(input);
+      if (nb_lits < 0) {
+          snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in PRODUCE directive", nb_lits);
+          trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+      }
       read_literals(nb_lits);
       const int nb_hints = trusted_utils_read_int(input);
+      if (nb_hints < 0) {
+          snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in PRODUCE directive", nb_hints);
+          trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+      }
       last_nb_lits = nb_lits;
 
       memcpy(&a[1], &iid, sizeof(iid));
@@ -609,6 +638,10 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       last_eid = eid;
       const u64 iid = external_to_internal_id(eid);
       const int nb_lits = trusted_utils_read_int(input);
+      if (nb_lits < 0) {
+          snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in IMPORT directive", nb_lits);
+          trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+      }
       last_nb_lits = nb_lits;
 
       memcpy(&a[1], &iid, sizeof(iid));
@@ -618,6 +651,10 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
       // Header layout: [type(1) | nb_hints(4)]
       const int nb_hints = trusted_utils_read_int(input);
+      if (nb_hints < 0) {
+          snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in DELETE directive", nb_hints);
+          trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+      }
 
       memcpy(&a[1], &nb_hints, sizeof(nb_hints));
 
