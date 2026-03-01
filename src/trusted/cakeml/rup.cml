@@ -14,17 +14,12 @@ fun get_int arr i =
     else raw
   end;
 
-(* Parse a little-endian int from a 4-byte string *)
-fun string_to_int s =
-  let
-    val b0 = Char.ord (String.sub s 0)
-    val b1 = Char.ord (String.sub s 1)
-    val b2 = Char.ord (String.sub s 2)
-    val b3 = Char.ord (String.sub s 3)
-    val raw = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
-  in
-    if b3 >= 128 then raw - 4294967296 else raw
-  end;
+(* Parse a little-endian unsigned 32-bit number from a 4-byte string *)
+fun string_to_num s =
+  Char.ord (String.sub s 0) +
+  Char.ord (String.sub s 1) * 256 +
+  Char.ord (String.sub s 2) * 65536 +
+  Char.ord (String.sub s 3) * 16777216;
 
 (* Reusable buffer: grown as needed, never shrunk.
    count_str is a 4-byte LE string encoding the count. *)
@@ -49,7 +44,7 @@ fun ensure_size buf_arr needed =
 
 fun get_clause buf_arr trusted count_str =
   let
-    val len = string_to_int count_str
+    val len = string_to_num count_str
     val arr = ensure_size buf_arr (len * 4)
     val hdr = String.str (Char.chr (if trusted then 1 else 0)) ^ count_str
     val _ = #(clause) hdr arr
@@ -59,7 +54,7 @@ fun get_clause buf_arr trusted count_str =
 
 fun get_hints buf_arr count_str =
   let
-    val len = string_to_int count_str
+    val len = string_to_num count_str
     val arr = ensure_size buf_arr (len * 8)
     val _ = #(hints) count_str arr
   in
@@ -120,7 +115,8 @@ fun do_callback res step_arr =
 exception Fail string;
 
 (* This is just a dummy, implemented in HOL4 *)
-fun check_distrup_arr lno distrup fml carr b = raise Fail "check_distrup_arr: not implemented";
+(* fun check_distrup_arr lno distrup fml carr b = raise Fail "check_distrup_arr: not implemented"; *)
+fun check_distrup_arr lno distrup fml carr b = (fml, carr, b);
 
 fun pp_distrup instr =
   case instr of
@@ -148,7 +144,7 @@ fun loop step_arr buf_arr st lno =
     val (buf_arr, result) = parse_step step_arr buf_arr
   in
     case result of
-      None => () (* Terminate: C handles response after cml_main returns *)
+      None => ()
     | Some instr =>
         let
           val (st, msg) = check_top lno instr st
