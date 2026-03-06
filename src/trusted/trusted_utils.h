@@ -6,11 +6,11 @@
 #include <stdio.h>     // for FILE
 
 #ifdef _MSC_VER
-#    define MALLOB_LIKELY(condition) condition
-#    define MALLOB_UNLIKELY(condition) condition
+#    define IMPCHK_LIKELY(condition) condition
+#    define IMPCHK_UNLIKELY(condition) condition
 #else
-#    define MALLOB_LIKELY(condition) __builtin_expect(condition, 1)
-#    define MALLOB_UNLIKELY(condition) __builtin_expect(condition, 0)
+#    define IMPCHK_LIKELY(condition) __builtin_expect(condition, 1)
+#    define IMPCHK_UNLIKELY(condition) __builtin_expect(condition, 0)
 #endif
 
 #if /* glibc >= 2.19: */ _DEFAULT_SOURCE || /* glibc <= 2.19: */ _SVID_SOURCE || _BSD_SOURCE

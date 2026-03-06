@@ -4,7 +4,7 @@
 #include <stdio.h>          // for snprintf
 #include "hash.h"           // for hash_table_find, hash_table_delete_last_f...
 #include "siphash.h"        // for siphash_digest, siphash_update
-#include "trusted_utils.h"  // for u64, trusted_utils_msgstr, MALLOB_UNLIKELY
+#include "trusted_utils.h"  // for u64, trusted_utils_msgstr, IMPCHK_UNLIKELY
 
 // Instantiate int_vec
 #define TYPE int
@@ -81,7 +81,7 @@ bool check_clause(u64 base_id, const int* lits, int nb_lits, const u64* hints, i
         // Find the clause for this hint
         const u64 hint_id = hints[i];
         int* cls = (int*) hash_table_find(clause_table, hint_id);
-        if (MALLOB_UNLIKELY(!cls)) {
+        if (IMPCHK_UNLIKELY(!cls)) {
             // ERROR - hint not found
             snprintf(trusted_utils_msgstr, 512, "Derivation %lu: hint %lu not found", base_id, hint_id);
             break;
@@ -95,7 +95,7 @@ bool check_clause(u64 base_id, const int* lits, int nb_lits, const u64* hints, i
             const int var = lit > 0 ? lit : -lit;
             if (var_values->data[var] == 0) {
                 // Literal is unassigned
-                if (MALLOB_UNLIKELY(new_unit != 0)) {
+                if (IMPCHK_UNLIKELY(new_unit != 0)) {
                     // ERROR - multiple unassigned literals in hint clause!
                     snprintf(trusted_utils_msgstr, 512, "Derivation %lu: multiple literals unassigned", base_id);
                     ok = false; break;
@@ -105,7 +105,7 @@ bool check_clause(u64 base_id, const int* lits, int nb_lits, const u64* hints, i
             }
             // Literal is fixed
             const bool sign = var_values->data[var]>0;
-            if (MALLOB_UNLIKELY(sign == (lit>0))) {
+            if (IMPCHK_UNLIKELY(sign == (lit>0))) {
                 // ERROR - clause is satisfied, so it is not a correct hint
                 snprintf(trusted_utils_msgstr, 512, "Derivation %lu: dependency %lu is satisfied", base_id, hint_id);
                 ok = false; break;
@@ -118,7 +118,7 @@ bool check_clause(u64 base_id, const int* lits, int nb_lits, const u64* hints, i
         if (new_unit == 0) {
             // No unassigned literal in the clause && clause not satisfied
             // -> Empty clause derived.
-            if (MALLOB_UNLIKELY(i+1 < nb_hints)) {
+            if (IMPCHK_UNLIKELY(i+1 < nb_hints)) {
                 // ERROR - not at the final hint yet!
                 snprintf(trusted_utils_msgstr, 512, "Derivation %lu: empty clause produced at non-final hint %lu", base_id, hint_id);
                 break;
@@ -270,7 +270,7 @@ bool lrat_check_validate_sat(int* model, u64 size) {
     // Check each original problem clause
     for (u64 id = 1; id <= nb_loaded_clauses; id++) {
         const int* cls = (int*) hash_table_find(clause_table, id);
-        if (MALLOB_UNLIKELY(!cls)) {
+        if (IMPCHK_UNLIKELY(!cls)) {
             // ERROR - clause not found
             snprintf(trusted_utils_msgstr, 512, "SAT validation: original ID %lu not found", id);
             return false;
@@ -280,14 +280,14 @@ bool lrat_check_validate_sat(int* model, u64 size) {
         for (int lit_idx = 0; cls[lit_idx] != 0; lit_idx++) {
             const int lit = cls[lit_idx];
             const int var = lit>0 ? lit : -lit;
-            if (MALLOB_UNLIKELY((u64) (var-1) >= size)) {
+            if (IMPCHK_UNLIKELY((u64) (var-1) >= size)) {
                 // ERROR - model does not cover this variable
                 snprintf(trusted_utils_msgstr, 512, "SAT validation: model does not cover variable %i", var);
                 return false;
             }
             // Is the literal satisfied in the model?
             int modelLit = model[var-1];
-            if (MALLOB_UNLIKELY(modelLit != var && modelLit != -var && modelLit != 0)) {
+            if (IMPCHK_UNLIKELY(modelLit != var && modelLit != -var && modelLit != 0)) {
                 // ERROR - clause not found
                 snprintf(trusted_utils_msgstr, 512, "SAT validation: unexpected literal %i in assignment of variable %i", modelLit, var);
                 return false;
@@ -305,7 +305,7 @@ bool lrat_check_validate_sat(int* model, u64 size) {
             }
         }
         // Clause NOT satisfied?
-        if (MALLOB_UNLIKELY(!satisfied)) {
+        if (IMPCHK_UNLIKELY(!satisfied)) {
             // ERROR - unsatisfied clause(s) remain(s)
             snprintf(trusted_utils_msgstr, 512, "SAT validation: original clause %lu not satisfied", id);
             return false;

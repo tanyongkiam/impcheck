@@ -94,7 +94,9 @@ void say(bool ok) {
 #if IMPCHECK_WRITE_DIRECTIVES
     writer_flush();
 #endif
-    trusted_utils_write_char(ok ? TRUSTED_CHK_RES_ACCEPT : TRUSTED_CHK_RES_ERROR, output);
+    char c = TRUSTED_CHK_RES_ACCEPT;
+    if (IMPCHK_UNLIKELY(!ok)) c = TRUSTED_CHK_RES_ERROR;
+    trusted_utils_write_char(c, output);
 #if IMPCHECK_FLUSH_ALWAYS
     UNLOCKED_IO(fflush)(output);
 #endif
@@ -238,7 +240,7 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
         } else if (c == TRUSTED_CHK_LOAD) {
 
             const int nb_lits = trusted_utils_read_int(input);
-            if (nb_lits < 0) {
+            if (IMPCHK_UNLIKELY(nb_lits < 0)) {
                 snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in LOAD directive", nb_lits);
                 trusted_utils_log_err(trusted_utils_msgstr);
                 last_read_directive_char = TRUSTED_CHK_TERMINATE;
@@ -267,7 +269,7 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 
             // Header layout: [type(1) | nb_hints(4)]
             const int nb_hints = trusted_utils_read_int(input);
-            if (nb_hints < 0) {
+            if (IMPCHK_UNLIKELY(nb_hints < 0)) {
                 snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in DELETE directive", nb_hints);
                 trusted_utils_log_err(trusted_utils_msgstr);
                 last_read_directive_char = TRUSTED_CHK_TERMINATE;
@@ -281,12 +283,19 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 #ifdef IMPCHECK_DEBUG_FILE
               fprintf(f_dbg, "delete cls %lu\n", hint); fflush(f_dbg);
 #endif
+              if (IMPCHK_UNLIKELY(hint == 0 || hint > orig_clauses->size)) {
+                snprintf(trusted_utils_msgstr, 512, "Load-phase delete: hint %lu out of range (loaded %lu clauses)", hint, orig_clauses->size);
+                trusted_utils_log_err(trusted_utils_msgstr);
+                all_ok = false;
+                break;
+              }
               int* cls = (int*) orig_clauses->data[hint-1];
-              if (!cls) {
+              if (IMPCHK_UNLIKELY(!cls)) {
                 // ERROR - clause already deleted
                 snprintf(trusted_utils_msgstr, 512, "Cannot load deleted clause %lu!", hint);
                 trusted_utils_log_err(trusted_utils_msgstr);
                 all_ok = false;
+                break;
               } else {
                 free(cls);
                 orig_clauses->data[hint-1] = 0;
@@ -299,7 +308,8 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
             siphash_pad(2); // two-byte padding for formula signature input
             u8* out_sig = siphash_digest();
             all_ok &= trusted_utils_equal_signatures(out_sig, formula_sig);
-            if (!all_ok) snprintf(trusted_utils_msgstr, 512, "Formula signature check failed");
+            if (IMPCHK_UNLIKELY(!all_ok))
+              snprintf(trusted_utils_msgstr, 512, "Formula signature check failed");
             int_vec_clear(vec_read_lits);
             vec_read_lits = 0;
             nb_loaded_clauses = orig_clauses->size;
@@ -324,7 +334,7 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
         writer_flush();
 #endif
 
-        if (MALLOB_UNLIKELY(!all_ok)) {
+        if (IMPCHK_UNLIKELY(!all_ok)) {
             if (!reported_error) {
                 trusted_utils_log_err(trusted_utils_msgstr);
                 reported_error = true;
@@ -480,7 +490,7 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
   assert(alen == 17);
 
   bool cml_ok = c[0] != '0';
-  if (!cml_ok && clen > 1) {
+  if (IMPCHK_UNLIKELY(!cml_ok && clen > 1)) {
       // Copy CakeML error message into trusted_utils_msgstr
       long msglen = clen - 1;
       if (msglen > 511) msglen = 511;
@@ -518,7 +528,7 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
       trusted_utils_read_sig(buf_sig, input);
       signature computed_sig;
       compute_clause_signature(last_eid, buf_lits->data, last_nb_lits, computed_sig);
-      if (!trusted_utils_equal_signatures(buf_sig, computed_sig)) {
+      if (IMPCHK_UNLIKELY(!trusted_utils_equal_signatures(buf_sig, computed_sig))) {
           snprintf(trusted_utils_msgstr, 512, "Signature check of clause %lu failed", last_eid);
           all_ok = false;
       }
@@ -551,7 +561,7 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
   writer_flush();
 #endif
 
-  if (MALLOB_UNLIKELY(!all_ok)) {
+  if (IMPCHK_UNLIKELY(!all_ok)) {
       if (!reported_error) {
           trusted_utils_log_err(trusted_utils_msgstr);
           reported_error = true;
@@ -612,7 +622,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
   }
 
   // All original problem clauses have been imported: Delete entire clause table
-  if (orig_clauses) {
+  if (IMPCHK_UNLIKELY(orig_clauses != 0)) {
     for (u64 i = 0; i < orig_clauses->size; i++) {
       int* cls = (int*) orig_clauses->data[i];
       if (cls) free(cls);
@@ -623,7 +633,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
   // Regular phase: parse directive from pipe.
   last_cls_data = NULL;
-  if (MALLOB_LIKELY(!last_read_directive_char))
+  if (IMPCHK_LIKELY(!last_read_directive_char))
     last_read_directive_char = trusted_utils_read_char(input);
   int c = last_read_directive_char;
   last_read_directive_char = 0;
@@ -640,13 +650,13 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       last_eid = eid;
       const u64 iid = external_to_internal_id(eid);
       const int nb_lits = trusted_utils_read_int(input);
-      if (nb_lits < 0) {
+      if (IMPCHK_UNLIKELY(nb_lits < 0)) {
           snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in PRODUCE directive", nb_lits);
           trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
       }
       read_literals(nb_lits);
       const int nb_hints = trusted_utils_read_int(input);
-      if (nb_hints < 0) {
+      if (IMPCHK_UNLIKELY(nb_hints < 0)) {
           snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in PRODUCE directive", nb_hints);
           trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
       }
@@ -663,7 +673,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       last_eid = eid;
       const u64 iid = external_to_internal_id(eid);
       const int nb_lits = trusted_utils_read_int(input);
-      if (nb_lits < 0) {
+      if (IMPCHK_UNLIKELY(nb_lits < 0)) {
           snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in IMPORT directive", nb_lits);
           trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
       }
@@ -676,7 +686,7 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
       // Header layout: [type(1) | nb_hints(4)]
       const int nb_hints = trusted_utils_read_int(input);
-      if (nb_hints < 0) {
+      if (IMPCHK_UNLIKELY(nb_hints < 0)) {
           snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in DELETE directive", nb_hints);
           trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
       }
