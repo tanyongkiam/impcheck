@@ -7,20 +7,9 @@
 #include "trusted_utils.h"  // for u8, trusted_utils_copy_bytes, trusted_uti...
 #include "confirm.h"
 
-bool parsed_formula = false;
-signature formula_signature;
-
-bool valid = true;
 
 
-void compute_clause_signature(u64 id, const int* lits, int nb_lits, u8* out) {
-    siphash_reset();
-    siphash_update((u8*) &id, sizeof(u64));
-    siphash_update((u8*) lits, nb_lits*sizeof(int));
-    siphash_update(formula_signature, SIG_SIZE_BYTES);
-    const u8* hash_out = siphash_digest();
-    trusted_utils_copy_bytes(out, hash_out, SIG_SIZE_BYTES);
-}
+
 
 
 void top_check_init(int nb_vars, bool check_model, bool lenient) {

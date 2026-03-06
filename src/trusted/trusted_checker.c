@@ -4,17 +4,15 @@
 #include <stdlib.h>         // for free
 #include <string.h>         // for memcpy
 #include <time.h>           // for clock, CLOCKS_PER_SEC, clock_t
-#include "top_check.h"      // for top_check_commit_formula_sig, top_check_d...
+#include <assert.h>         // asserts
+#include <unistd.h>         // for write
+
+#include "secret.h"
 #include "trusted_utils.h"  // for trusted_utils_read_int, trusted_utils_log...
 #include "checker_interface.h"
 #include "confirm.h"        // for confirm_result
-
-#include <assert.h>         // asserts
-#include <unistd.h>         // for write
 #include "hash.h"              // for hash_table_find
-
-/* from top_check.c */
-extern void compute_clause_signature(u64 id, const int* lits, int nb_lits, u8* out);
+#include "siphash.h"
 
 #if IMPCHECK_WRITE_DIRECTIVES
 #include "../writer.h"
@@ -43,10 +41,12 @@ FILE* output; // named pipe
 int nb_vars; // # variables in formula
 signature formula_sig; // formula signature
 
-bool do_logging = true;
-
 signature buf_sig;
 struct int_vec* buf_lits;
+struct u64_vec* orig_clauses;
+u64 nb_loaded_clauses = 0;
+struct int_vec* clause_to_add;
+struct int_vec* vec_read_lits;
 
 // State passed from ffistep to other FFIs
 u64 fake_import_id;      // Next clause ID to replay in import phase
@@ -61,15 +61,16 @@ struct u64_vec* id_queue;
 u64 next_id_to_allocate;
 u64 max_eid;
 
-/* from lrat_check.c */
-extern struct u64_vec* orig_clauses;
-extern u64 nb_loaded_clauses;
-
 /* exported in cake.S */
 extern int cml_main(void);
 extern void *cml_heap;
 extern void *cml_stack;
 extern void *cml_stackend;
+
+// Counters and error state, shared between tc_run and fficallback
+u64 nb_produced, nb_imported, nb_deleted;
+bool all_ok;
+bool reported_error;
 
 // These are unused
 extern char cake_text_begin;
@@ -79,6 +80,15 @@ extern char cake_codebuffer_end;
 #ifdef IMPCHECK_DEBUG_FILE
 FILE* f_dbg;
 #endif
+
+void compute_clause_signature(u64 id, const int* lits, int nb_lits, u8* out) {
+  siphash_reset();
+  siphash_update((u8*) &id, sizeof(u64));
+  siphash_update((u8*) lits, nb_lits*sizeof(int));
+  siphash_update(formula_sig, SIG_SIZE_BYTES);
+  const u8* hash_out = siphash_digest();
+  trusted_utils_copy_bytes(out, hash_out, SIG_SIZE_BYTES);
+}
 
 void say(bool ok) {
 #if IMPCHECK_WRITE_DIRECTIVES
@@ -105,6 +115,7 @@ void tc_init(const char* fifo_in, const char* fifo_out) {
     output = fopen(fifo_out, "w");
     if (!output) trusted_utils_exit_eof();
     buf_lits = int_vec_init(1 << 14);
+    vec_read_lits = int_vec_init(1024);
     last_hints = u64_vec_init(1 << 10);
     id_table = hash_table_init(10);
     id_queue = u64_vec_init(1024);
@@ -119,11 +130,6 @@ void tc_end(void) {
     fclose(output);
     fclose(input);
 }
-
-// Counters and error state, shared between tc_run and fficallback
-u64 nb_produced, nb_imported, nb_deleted;
-bool all_ok;
-bool reported_error;
 
 void print_stats_at_exit(clock_t start) {
     float elapsed = (float) (clock() - start) / CLOCKS_PER_SEC;
@@ -222,9 +228,11 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
                 last_read_directive_char = TRUSTED_CHK_TERMINATE;
                 break;
             }
-            top_check_init(nb_vars, check_model, lenient);
+            siphash_init(SECRET_KEY);
+            orig_clauses = u64_vec_init(4096);
+            clause_to_add = int_vec_init(512);
+
             trusted_utils_read_sig(formula_sig, input);
-            top_check_commit_formula_sig(formula_sig);
             say_with_flush(true);
 
         } else if (c == TRUSTED_CHK_LOAD) {
@@ -236,10 +244,21 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
                 last_read_directive_char = TRUSTED_CHK_TERMINATE;
                 break;
             }
-            int* lits = trusted_utils_malloc(nb_lits * sizeof(int));
-            trusted_utils_read_ints(lits, nb_lits, input);
-            for (int i = 0; i < nb_lits; i++) top_check_load(lits[i]);
-            free(lits);
+            int_vec_reserve(vec_read_lits, nb_lits);
+            trusted_utils_read_ints(vec_read_lits->data, nb_lits, input);
+            for (int i = 0; i < nb_lits; i++) {
+              int lit = vec_read_lits->data[i];
+              int_vec_push(clause_to_add, lit);
+              if (lit == 0) {
+                int clslen = clause_to_add->size;
+                int* cls = trusted_utils_calloc(clslen+1, sizeof(int));
+                for (int i = 0; i < clslen; i++) cls[i] = clause_to_add->data[i];
+                cls[clslen] = 0;
+                u64_vec_push(orig_clauses, *(u64*)&cls);
+                siphash_update((u8*) clause_to_add->data, clause_to_add->size*sizeof(int));
+                int_vec_clear(clause_to_add);
+              }
+            }
             // NO FEEDBACK
 
         } else if (c == TRUSTED_CHK_CLS_DELETE) {
@@ -277,7 +296,14 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 
         } else if (c == TRUSTED_CHK_END_LOAD) {
 
-            say_with_flush(top_check_end_load());
+            siphash_pad(2); // two-byte padding for formula signature input
+            u8* out_sig = siphash_digest();
+            all_ok &= trusted_utils_equal_signatures(out_sig, formula_sig);
+            if (!all_ok) snprintf(trusted_utils_msgstr, 512, "Formula signature check failed");
+            int_vec_clear(vec_read_lits);
+            vec_read_lits = 0;
+            nb_loaded_clauses = orig_clauses->size;
+            say_with_flush(all_ok);
             ended_loading = true;
 
         } else if (c == TRUSTED_CHK_TERMINATE) {
@@ -298,7 +324,7 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
         writer_flush();
 #endif
 
-        if (MALLOB_UNLIKELY(!top_check_valid())) {
+        if (MALLOB_UNLIKELY(!all_ok)) {
             if (!reported_error) {
                 trusted_utils_log_err(trusted_utils_msgstr);
                 reported_error = true;
@@ -306,7 +332,6 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
         }
     }
 
-    all_ok = top_check_valid();
     fake_import_id = 1;
 
     // *************************************************************
