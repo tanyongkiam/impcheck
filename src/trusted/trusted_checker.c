@@ -43,10 +43,9 @@ signature formula_sig; // formula signature
 
 signature buf_sig;
 struct int_vec* buf_lits;
-struct u64_vec* orig_clauses;
-u64 nb_loaded_clauses = 0;
-struct int_vec* clause_to_add;
-struct int_vec* vec_read_lits;
+struct int_vec* formula_lits;
+u64 formula_import_pos;
+u64 max_loadphase_deletion_hint;
 
 // State passed from ffistep to other FFIs
 u64 fake_import_id;      // Next clause ID to replay in import phase
@@ -117,7 +116,7 @@ void tc_init(const char* fifo_in, const char* fifo_out) {
     output = fopen(fifo_out, "w");
     if (!output) trusted_utils_exit_eof();
     buf_lits = int_vec_init(1 << 14);
-    vec_read_lits = int_vec_init(1024);
+    formula_lits = int_vec_init(1024);
     last_hints = u64_vec_init(1 << 10);
     id_table = hash_table_init(10);
     id_queue = u64_vec_init(1024);
@@ -140,10 +139,7 @@ void print_stats_at_exit(clock_t start) {
     trusted_utils_log(trusted_utils_msgstr);
 }
 
-u64 external_to_internal_id(u64 eid) {
-  // check if already mapped
-  u64 existing = (u64)hash_table_find(id_table, eid);
-  if (existing) return existing;
+inline u64 external_to_internal_id_notintable(u64 eid) {
   if (eid > max_eid) max_eid = eid;
   // allocate a new internal ID
   u64 iid;
@@ -160,6 +156,12 @@ u64 external_to_internal_id(u64 eid) {
   bool ok = hash_table_insert(id_table, eid, (void*)iid);
   assert(ok);
   return iid;
+}
+u64 external_to_internal_id(u64 eid) {
+  // check if already mapped
+  u64 existing = (u64)hash_table_find(id_table, eid);
+  if (existing) return existing;
+  return external_to_internal_id_notintable(eid);
 }
 void free_id(u64 eid) {
   // delete mapping from the table
@@ -231,9 +233,6 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
                 break;
             }
             siphash_init(SECRET_KEY);
-            orig_clauses = u64_vec_init(4096);
-            clause_to_add = int_vec_init(512);
-
             trusted_utils_read_sig(formula_sig, input);
             say_with_flush(true);
 
@@ -246,21 +245,11 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
                 last_read_directive_char = TRUSTED_CHK_TERMINATE;
                 break;
             }
-            int_vec_reserve(vec_read_lits, nb_lits);
-            trusted_utils_read_ints(vec_read_lits->data, nb_lits, input);
-            for (int i = 0; i < nb_lits; i++) {
-              int lit = vec_read_lits->data[i];
-              int_vec_push(clause_to_add, lit);
-              if (lit == 0) {
-                int clslen = clause_to_add->size;
-                int* cls = trusted_utils_calloc(clslen+1, sizeof(int));
-                for (int i = 0; i < clslen; i++) cls[i] = clause_to_add->data[i];
-                cls[clslen] = 0;
-                u64_vec_push(orig_clauses, *(u64*)&cls);
-                siphash_update((u8*) clause_to_add->data, clause_to_add->size*sizeof(int));
-                int_vec_clear(clause_to_add);
-              }
-            }
+            u64 prev_size = formula_lits->size;
+            int_vec_reserve(formula_lits, prev_size + nb_lits);
+            trusted_utils_read_ints(formula_lits->data + prev_size, nb_lits, input);
+            formula_lits->size = prev_size + nb_lits;
+            siphash_update((u8*) (formula_lits->data + prev_size), nb_lits*sizeof(int));
             // NO FEEDBACK
 
         } else if (c == TRUSTED_CHK_CLS_DELETE) {
@@ -283,23 +272,16 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 #ifdef IMPCHECK_DEBUG_FILE
               fprintf(f_dbg, "delete cls %lu\n", hint); fflush(f_dbg);
 #endif
-              if (IMPCHK_UNLIKELY(hint == 0 || hint > orig_clauses->size)) {
-                snprintf(trusted_utils_msgstr, 512, "Load-phase delete: hint %lu out of range (loaded %lu clauses)", hint, orig_clauses->size);
+              if (IMPCHK_UNLIKELY(hint == 0)) {
+                snprintf(trusted_utils_msgstr, 512, "Load-phase delete: hint %lu out of range", hint);
                 trusted_utils_log_err(trusted_utils_msgstr);
                 all_ok = false;
                 break;
               }
-              int* cls = (int*) orig_clauses->data[hint-1];
-              if (IMPCHK_UNLIKELY(!cls)) {
-                // ERROR - clause already deleted
-                snprintf(trusted_utils_msgstr, 512, "Cannot load deleted clause %lu!", hint);
-                trusted_utils_log_err(trusted_utils_msgstr);
-                all_ok = false;
-                break;
-              } else {
-                free(cls);
-                orig_clauses->data[hint-1] = 0;
-              }
+              max_loadphase_deletion_hint = hint > max_loadphase_deletion_hint ? hint : max_loadphase_deletion_hint;
+              // This call marks the ID for deletion by inserting it into the ID table
+              // (at this point, there are no other uses for the table).
+              external_to_internal_id(hint);
             }
             say(all_ok);
 
@@ -307,14 +289,12 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 
             siphash_pad(2); // two-byte padding for formula signature input
             u8* out_sig = siphash_digest();
-            all_ok &= trusted_utils_equal_signatures(out_sig, formula_sig);
+            all_ok = all_ok && trusted_utils_equal_signatures(out_sig, formula_sig);
             if (IMPCHK_UNLIKELY(!all_ok))
               snprintf(trusted_utils_msgstr, 512, "Formula signature check failed");
-            int_vec_clear(vec_read_lits);
-            vec_read_lits = 0;
-            nb_loaded_clauses = orig_clauses->size;
             say_with_flush(all_ok);
             ended_loading = true;
+            formula_import_pos = 0;
 
         } else if (c == TRUSTED_CHK_TERMINATE) {
 
@@ -585,29 +565,48 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
 
   // Simulated import phase: replay loaded formula clauses to CakeML
   // as import steps.
-  while (fake_import_id <= nb_loaded_clauses) {
+  while (formula_lits != 0 && formula_import_pos < formula_lits->size) {
+
+      if (IMPCHK_UNLIKELY((fake_import_id & ((1<<23)-1)) == 0)) {
+        snprintf(trusted_utils_msgstr, 512, "Loading clause %lu to CakeML\n", fake_import_id);
+        trusted_utils_log(trusted_utils_msgstr);
+        fflush(stdout);
+      }
 
       const u64 eid = fake_import_id;
-      int* cls = *(int**)& orig_clauses->data[eid - 1];
-      if (!cls) {
-        // Clause was deleted: skip
-#ifdef IMPCHECK_DEBUG_FILE
-        fprintf(f_dbg, "skip deleted clause %lu\n", eid); fflush(f_dbg);
-#endif
-        fake_import_id++;
-        continue;
-      }
+      int* cls = formula_lits->data + formula_import_pos;
 
 #ifdef IMPCHECK_DEBUG_FILE
       fprintf(f_dbg, "ffistep (pre) %lu\n", fake_import_id); fflush(f_dbg);
 #endif
 
-      last_eid = eid;
-      const u64 iid = external_to_internal_id(eid);
-
       // count literals (always zero-terminated)
       int nb_lits = 0;
-      while (cls[nb_lits] != 0) nb_lits++;
+      while (formula_import_pos+1 < formula_lits->size && cls[nb_lits] != 0) {
+        nb_lits++;
+        formula_import_pos++;
+      }
+      formula_import_pos++;
+
+      if (IMPCHK_UNLIKELY(cls[nb_lits] != 0)) {
+        trusted_utils_log_err("Invalid clause during load phase");
+        a[0] = TRUSTED_CHK_TERMINATE; return;
+      }
+
+      last_eid = eid;
+      // Check if the ext. ID is already in the table, i.e., marked as deleted
+      u64 existing = (u64)hash_table_find(id_table, eid);
+      if (existing) {
+        // Clause marked as deleted from loading stage: skip
+#ifdef IMPCHECK_DEBUG_FILE
+        fprintf(f_dbg, "skip deleted clause %lu\n", eid); fflush(f_dbg);
+#endif
+        free_id(eid); // delete from table, free up internal ID
+        fake_import_id++;
+        continue;
+      }
+      // Otherwise: Create a proper internal ID for the clause now
+      const u64 iid = external_to_internal_id_notintable(eid);
 
       // store pointer for fficlause to copy from
       last_cls_data = cls;
@@ -622,13 +621,16 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
   }
 
   // All original problem clauses have been imported: Delete entire clause table
-  if (IMPCHK_UNLIKELY(orig_clauses != 0)) {
-    for (u64 i = 0; i < orig_clauses->size; i++) {
-      int* cls = (int*) orig_clauses->data[i];
-      if (cls) free(cls);
+  if (IMPCHK_UNLIKELY(formula_lits != 0)) {
+    int_vec_free(formula_lits);
+    formula_lits = 0;
+
+    u64 last_imported_eid = fake_import_id-1;
+    if (IMPCHK_UNLIKELY(max_loadphase_deletion_hint > last_imported_eid)) {
+      snprintf(trusted_utils_msgstr, 512, "Invalid deletion hint %lu (and possibly more) during load phase",
+        max_loadphase_deletion_hint);
+      trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
     }
-    u64_vec_free(orig_clauses);
-    orig_clauses = 0;
   }
 
   // Regular phase: parse directive from pipe.
