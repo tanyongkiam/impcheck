@@ -69,7 +69,9 @@ extern void *cml_stackend;
 // Counters and error state, shared between tc_run and fficallback
 u64 nb_produced, nb_imported, nb_deleted;
 bool all_ok;
-bool reported_error;
+int nb_reported_errors;
+int max_nb_errors_to_report;
+clock_t start;
 
 // These are unused
 extern char cake_text_begin;
@@ -121,6 +123,9 @@ void tc_init(const char* fifo_in, const char* fifo_out) {
     id_table = hash_table_init(10);
     id_queue = u64_vec_init(1024);
     next_id_to_allocate = 1;
+    fake_import_id = 1;
+    nb_reported_errors = 0;
+    max_nb_errors_to_report = 10;
 }
 
 void tc_end(void) {
@@ -132,11 +137,31 @@ void tc_end(void) {
     fclose(input);
 }
 
-void print_stats_at_exit(clock_t start) {
+void print_stats_at_exit() {
     float elapsed = (float) (clock() - start) / CLOCKS_PER_SEC;
     snprintf(trusted_utils_msgstr, 512, "cpu:%.3f prod:%lu imp:%lu del:%lu maxid=%lu",
       elapsed, nb_produced, nb_imported, nb_deleted, next_id_to_allocate-1);
     trusted_utils_log(trusted_utils_msgstr);
+    if (nb_reported_errors > max_nb_errors_to_report) {
+      snprintf(trusted_utils_msgstr, 512, "Suppressed %i additional error messages",
+      nb_reported_errors - max_nb_errors_to_report);
+      trusted_utils_log(trusted_utils_msgstr);
+    }
+}
+void react_error() {
+  all_ok = false;
+  if (nb_reported_errors < max_nb_errors_to_report) {
+    trusted_utils_log_err(trusted_utils_msgstr);
+  }
+  nb_reported_errors++;
+}
+void react_error_char(unsigned char* return_char) {
+  if (return_char) *return_char = TRUSTED_CHK_TERMINATE;
+  react_error();
+}
+void react_error_int(int* return_char) {
+  if (return_char) *return_char = TRUSTED_CHK_TERMINATE;
+  react_error();
 }
 
 inline u64 external_to_internal_id_notintable(u64 eid) {
@@ -173,15 +198,8 @@ void free_id(u64 eid) {
   u64_vec_push(id_queue, iid);
 }
 
-int tc_run(bool check_model, bool lenient, long producer_id, long producer_count, int heap_megabytes) {
-    clock_t start = clock();
-    nb_produced = 0;
-    nb_imported = 0;
-    nb_deleted = 0;
+void alloc_memory_for_cakeml(int heap_megabytes) {
 
-    reported_error = false;
-
-    // TODO: use ImpCheck's command line to set these
     unsigned long sz = 1024*1024; // 1 MB unit
     unsigned long cml_heap_sz = heap_megabytes * sz;    // Default: 1 GB heap
     unsigned long cml_stack_sz = 48 * sz;   // Default: 1 GB stack
@@ -189,10 +207,10 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
     // Min sizes for CML heap and stack
     if(cml_heap_sz < sz || cml_stack_sz < sz || cml_heap_sz + cml_stack_sz < 8192)
     {
-      // TODO: use proper ImpCheck exit mechanism
       #ifdef STDERR_MEM_EXHAUST
       fprintf(stderr,"Too small requested heap (%lu) or stack (%lu) size in bytes.\n",cml_heap_sz, cml_stack_sz);
       #endif
+      print_stats_at_exit();
       exit(3);
     }
 
@@ -204,11 +222,19 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
       fprintf(stderr,"failed to allocate sufficient CakeML heap and stack space.\n");
       perror("malloc");
       #endif
+      print_stats_at_exit();
       exit(3);
     }
 
     cml_stack = (char*)cml_heap + cml_heap_sz;
     cml_stackend = (char*)cml_stack + cml_stack_sz;
+}
+
+int tc_run(bool check_model, bool lenient, long producer_id, long producer_count, int heap_megabytes) {
+    start = clock();
+    nb_produced = 0;
+    nb_imported = 0;
+    nb_deleted = 0;
 
 #ifdef IMPCHECK_DEBUG_FILE
     char fname_dbg[512];
@@ -228,8 +254,7 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
             nb_vars = trusted_utils_read_int(input);
             if (nb_vars < 0) {
                 snprintf(trusted_utils_msgstr, 512, "Negative nb_vars %d in INIT directive", nb_vars);
-                trusted_utils_log_err(trusted_utils_msgstr);
-                last_read_directive_char = TRUSTED_CHK_TERMINATE;
+                react_error();
                 break;
             }
             siphash_init(SECRET_KEY);
@@ -241,8 +266,7 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
             const int nb_lits = trusted_utils_read_int(input);
             if (IMPCHK_UNLIKELY(nb_lits < 0)) {
                 snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in LOAD directive", nb_lits);
-                trusted_utils_log_err(trusted_utils_msgstr);
-                last_read_directive_char = TRUSTED_CHK_TERMINATE;
+                react_error();
                 break;
             }
             u64 prev_size = formula_lits->size;
@@ -260,8 +284,7 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
             const int nb_hints = trusted_utils_read_int(input);
             if (IMPCHK_UNLIKELY(nb_hints < 0)) {
                 snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in DELETE directive", nb_hints);
-                trusted_utils_log_err(trusted_utils_msgstr);
-                last_read_directive_char = TRUSTED_CHK_TERMINATE;
+                react_error();
                 break;
             }
             u64_vec_reserve(last_hints, nb_hints);
@@ -274,8 +297,7 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 #endif
               if (IMPCHK_UNLIKELY(hint == 0)) {
                 snprintf(trusted_utils_msgstr, 512, "Load-phase delete: hint %lu out of range", hint);
-                trusted_utils_log_err(trusted_utils_msgstr);
-                all_ok = false;
+                react_error();
                 break;
               }
               max_loadphase_deletion_hint = hint > max_loadphase_deletion_hint ? hint : max_loadphase_deletion_hint;
@@ -290,8 +312,11 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
             siphash_pad(2); // two-byte padding for formula signature input
             u8* out_sig = siphash_digest();
             all_ok = all_ok && trusted_utils_equal_signatures(out_sig, formula_sig);
-            if (IMPCHK_UNLIKELY(!all_ok))
+            if (IMPCHK_UNLIKELY(!all_ok)) {
               snprintf(trusted_utils_msgstr, 512, "Formula signature check failed");
+              react_error();
+              break;
+            }
             say_with_flush(all_ok);
             ended_loading = true;
             formula_import_pos = 0;
@@ -299,13 +324,13 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
         } else if (c == TRUSTED_CHK_TERMINATE) {
 
             say_with_flush(true); // TERMINATE response
-            print_stats_at_exit(start);
+            print_stats_at_exit();
             exit(0);
 
         } else {
             if (!ended_loading) {
               snprintf(trusted_utils_msgstr, 512, "Invalid directive \"%c\" (%i) during formula loading!", c, c);
-              trusted_utils_log_err(trusted_utils_msgstr);
+              react_error();
             }
             break;
         }
@@ -314,17 +339,17 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
         writer_flush();
 #endif
 
-        if (IMPCHK_UNLIKELY(!all_ok)) {
-            if (!reported_error) {
-                trusted_utils_log_err(trusted_utils_msgstr);
-                reported_error = true;
-            }
-        }
+        if (IMPCHK_UNLIKELY(!all_ok))
+          react_error_int(&last_read_directive_char);
     }
 
-    fake_import_id = 1;
+    if (IMPCHK_UNLIKELY(!all_ok)) {
+      print_stats_at_exit();
+      return 0;
+    }
 
     // *************************************************************
+    alloc_memory_for_cakeml(heap_megabytes);
     int cml_ret = cml_main(); // Passing main loop control to CakeML
     // *************************************************************
 
@@ -333,24 +358,21 @@ int tc_run(bool check_model, bool lenient, long producer_id, long producer_count
 #endif
     if (cml_ret != 0) {
         snprintf(trusted_utils_msgstr, 512, "CakeML exited with code %d", cml_ret);
-        trusted_utils_log(trusted_utils_msgstr);
-        all_ok = false;
+        react_error();
+    } else {
+        say_with_flush(true); // TERMINATE response
     }
 
-    say_with_flush(true); // TERMINATE response
-    print_stats_at_exit(start);
-    return 0;
+    print_stats_at_exit();
+    return cml_ret;
 }
+
+
+
+
+
 
 // CakeML FFIs
-
-void cml_exit(int arg) {
-  // TODO: use ImpCheck's error mechanisms
-  if (arg != 0) {
-    fprintf(stderr,"CakeML exited with nonzero exit code.\n");
-    exit(arg);
-  }
-}
 
 void cml_clear(void) {
   // should never be called
@@ -361,8 +383,11 @@ void cml_err(int arg) {
   if (arg == 3) {
     fprintf(stderr,"Memory not ready for entry. You may have not run the init code yet, or be trying to enter during an FFI call.\n");
   }
-
-  cml_exit(arg);
+  if (arg != 0) {
+    fprintf(stderr,"CakeML exited with nonzero exit code.\n");
+    print_stats_at_exit();
+    exit(arg);
+  }
 }
 
 int byte2_to_int(unsigned char *b){
@@ -381,6 +406,10 @@ void int_to_byte2(int i, unsigned char *b){
     b[1] = i & 0xFF;
 }
 
+
+
+
+// Called from the CakeML side (?)
 void ffiwrite (unsigned char *c, long clen, unsigned char *a, long alen){
   (void)clen; (void)alen;
 #ifdef IMPCHECK_DEBUG_FILE
@@ -464,7 +493,7 @@ void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
 // c[1..clen-1]: error message from CakeML (if any)
 // a: the same 17-byte step header from ffistep
 // buf_lits is guaranteed to contain the clause for PRODUCE and IMPORT
-void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
+void fficallback (unsigned char *c, long clen, unsigned char *a, long alen) {
   (void)alen;
   assert(clen >= 1);
   assert(alen == 17);
@@ -479,7 +508,11 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
   }
   all_ok = cml_ok && all_ok;
 
-  if (!last_cls_data) {
+  if (last_cls_data) {
+    if (IMPCHK_UNLIKELY(!all_ok))
+      react_error_char(&a[0]);
+    return;
+  }
 
   int directive = a[0];
 #ifdef IMPCHECK_DEBUG_FILE
@@ -510,7 +543,7 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
       compute_clause_signature(last_eid, buf_lits->data, last_nb_lits, computed_sig);
       if (IMPCHK_UNLIKELY(!trusted_utils_equal_signatures(buf_sig, computed_sig))) {
           snprintf(trusted_utils_msgstr, 512, "Signature check of clause %lu failed", last_eid);
-          all_ok = false;
+          react_error();
       }
       say(all_ok);
       nb_imported++;
@@ -532,22 +565,19 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
       trusted_utils_write_sig(buf_sig, output);
       UNLOCKED_IO(fflush)(output);
       if (all_ok) trusted_utils_log("UNSAT validated");
-
   }
-
-  } // end if (!last_cls_data)
 
 #if IMPCHECK_WRITE_DIRECTIVES
   writer_flush();
 #endif
 
   if (IMPCHK_UNLIKELY(!all_ok)) {
-      if (!reported_error) {
-          trusted_utils_log_err(trusted_utils_msgstr);
-          reported_error = true;
-      }
+    react_error_char(&a[0]);
   }
 }
+
+
+
 
 // ffistep: CakeML calls this to get the header for the next instruction
 // {'a' | nb_lits | nb_hints} - produce
@@ -557,11 +587,11 @@ void fficallback (unsigned char *c, long clen, unsigned char *a, long alen){
 // {'V'} - validate UNSAT
 void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
   (void)empty; (void)clen; (void)alen;
-  assert(clen == 0);
-  assert(alen == 17);
+  assert(clen == 0); // unused
 
   // 1 byte for initial step symbol
-  // max of 1 + 8 + 4 + 4 for TRUSTED_CHK_CLS_PRODUCE
+  // max of 1 + 8 + 4 + 4 = 17 for TRUSTED_CHK_CLS_PRODUCE
+  assert(alen == 17);
 
   // Simulated import phase: replay loaded formula clauses to CakeML
   // as import steps.
@@ -583,14 +613,18 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       // count literals (always zero-terminated)
       int nb_lits = 0;
       while (formula_import_pos+1 < formula_lits->size && cls[nb_lits] != 0) {
+        // literal != 0 found
         nb_lits++;
         formula_import_pos++;
       }
       formula_import_pos++;
 
+      // Make sure that we read an entire clause.
+      // (we can never read more than one clause because we pass at most one zero)
       if (IMPCHK_UNLIKELY(cls[nb_lits] != 0)) {
-        trusted_utils_log_err("Invalid clause during load phase");
-        a[0] = TRUSTED_CHK_TERMINATE; return;
+        snprintf(trusted_utils_msgstr, 512, "Invalid clause during load phase");
+        react_error_char(&a[0]);
+        return;
       }
 
       last_eid = eid;
@@ -617,29 +651,34 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       memcpy(&a[1 + sizeof(iid)], &nb_lits, sizeof(nb_lits));
 
       fake_import_id++;
-      return;
+      return; // return clause as import
   }
 
-  // All original problem clauses have been imported: Delete entire clause table
+  // All original problem clauses have been imported: Delete C-side formula
   if (IMPCHK_UNLIKELY(formula_lits != 0)) {
     int_vec_free(formula_lits);
     formula_lits = 0;
 
+    // We need to check retroactively if one of the deletions during the load phase
+    // was actually illegal, i.e., referred to a non original clause.
     u64 last_imported_eid = fake_import_id-1;
     if (IMPCHK_UNLIKELY(max_loadphase_deletion_hint > last_imported_eid)) {
       snprintf(trusted_utils_msgstr, 512, "Invalid deletion hint %lu (and possibly more) during load phase",
         max_loadphase_deletion_hint);
-      trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+      react_error_char(&a[0]);
+      return;
     }
   }
 
   // Regular phase: parse directive from pipe.
   last_cls_data = NULL;
+  // possibly handle the last read directive char from the loading phase
   if (IMPCHK_LIKELY(!last_read_directive_char))
     last_read_directive_char = trusted_utils_read_char(input);
   int c = last_read_directive_char;
   last_read_directive_char = 0;
-  a[0] = c; // Pass the initial character to CakeML
+
+  a[0] = c; // Pass the directive to CakeML
 
 #ifdef IMPCHECK_DEBUG_FILE
   fprintf(f_dbg, "ffistep (post) %c\n", c); fflush(f_dbg);
@@ -654,13 +693,15 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       const int nb_lits = trusted_utils_read_int(input);
       if (IMPCHK_UNLIKELY(nb_lits < 0)) {
           snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in PRODUCE directive", nb_lits);
-          trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+          react_error_char(&a[0]);
+          return;
       }
       read_literals(nb_lits);
       const int nb_hints = trusted_utils_read_int(input);
       if (IMPCHK_UNLIKELY(nb_hints < 0)) {
           snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in PRODUCE directive", nb_hints);
-          trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+          react_error_char(&a[0]);
+          return;
       }
       last_nb_lits = nb_lits;
 
@@ -677,7 +718,8 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       const int nb_lits = trusted_utils_read_int(input);
       if (IMPCHK_UNLIKELY(nb_lits < 0)) {
           snprintf(trusted_utils_msgstr, 512, "Negative nb_lits %d in IMPORT directive", nb_lits);
-          trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+          react_error_char(&a[0]);
+          return;
       }
       last_nb_lits = nb_lits;
 
@@ -690,18 +732,19 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       const int nb_hints = trusted_utils_read_int(input);
       if (IMPCHK_UNLIKELY(nb_hints < 0)) {
           snprintf(trusted_utils_msgstr, 512, "Negative nb_hints %d in DELETE directive", nb_hints);
-          trusted_utils_log_err(trusted_utils_msgstr); a[0] = TRUSTED_CHK_TERMINATE; return;
+          react_error_char(&a[0]);
+          return;
       }
 
       memcpy(&a[1], &nb_hints, sizeof(nb_hints));
 
   } else if (c == TRUSTED_CHK_VALIDATE_SAT) {
-      trusted_utils_log_err("SAT validation (M) not supported with CakeML");
+      snprintf(trusted_utils_msgstr, 512, "SAT validation (M) not supported with CakeML");
+      react_error_char(&a[0]);
 
   } else if (c != TRUSTED_CHK_VALIDATE_UNSAT && c != TRUSTED_CHK_TERMINATE) {
       snprintf(trusted_utils_msgstr, sizeof(trusted_utils_msgstr),
                "Invalid directive in ffistep: '%c' (%d)", c, c);
-      trusted_utils_log_err(trusted_utils_msgstr);
+      react_error_char(&a[0]);
   }
 }
-
