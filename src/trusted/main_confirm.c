@@ -18,8 +18,8 @@ int main(int argc, char *argv[]) {
 
     const char *formula_input = "", *result_sig = "", *resultint_str = "", *seed_str = "0";
     for (int i = 0; i < argc; i++) {
-        trusted_utils_try_match_arg(argv[i], "-formula-input=", &formula_input);
-        trusted_utils_try_match_arg(argv[i], "-result-sig=", &result_sig);
+        trusted_utils_try_match_arg(argv[i], "-formula=", &formula_input);
+        trusted_utils_try_match_arg(argv[i], "-sig=", &result_sig);
         trusted_utils_try_match_arg(argv[i], "-result=", &resultint_str);
         trusted_utils_try_match_arg(argv[i], "-key-seed=", &seed_str);
     }

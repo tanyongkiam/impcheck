@@ -10,8 +10,8 @@ int main(int argc, char *argv[]) {
 
     const char *formula_input = "", *fifo_parsed_formula = "", *seed_str = "0";
     for (int i = 0; i < argc; i++) {
-        trusted_utils_try_match_arg(argv[i], "-formula-input=", &formula_input);
-        trusted_utils_try_match_arg(argv[i], "-fifo-parsed-formula=", &fifo_parsed_formula);
+        trusted_utils_try_match_arg(argv[i], "-formula=", &formula_input);
+        trusted_utils_try_match_arg(argv[i], "-output=", &fifo_parsed_formula);
         trusted_utils_try_match_arg(argv[i], "-key-seed=", &seed_str);
     }
     generate_key(seed_str);
