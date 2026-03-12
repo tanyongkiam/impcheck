@@ -430,155 +430,6 @@ void ffiwrite (unsigned char *c, long clen, unsigned char *a, long alen){
   }
 }
 
-// fficlause: CakeML calls this to fetch the next clause
-// c[0]: nonzero = trusted (import), 0 = untrusted (produce)
-// c[1..4]: nb_lits as little-endian int
-void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
-  (void)clen; (void)alen;
-  assert(clen == 5);
-#ifdef IMPCHECK_DEBUG_FILE
-  fprintf(f_dbg, "fficlause\n"); fflush(f_dbg);
-#endif
-
-  bool trusted = c[0];
-  int nb_lits;
-  memcpy(&nb_lits, &c[1], sizeof(int));
-  assert(nb_lits >= 0);
-  assert(nb_lits == last_nb_lits);
-  assert((long)(nb_lits * sizeof(int)) <= alen);
-
-  if (trusted) {
-      if (last_cls_data) {
-          memcpy(a, last_cls_data, nb_lits * sizeof(int));
-      } else {
-          // Read literals into buf_lits (for fficallback), then copy to CakeML
-          read_literals(nb_lits);
-          memcpy(a, buf_lits->data, nb_lits * sizeof(int));
-      }
-  } else {
-      // Untrusted clause literals already read by ffistep into buf_lits
-      memcpy(a, buf_lits->data, nb_lits * sizeof(int));
-  }
-#ifdef IMPCHECK_DEBUG_FILE
-  fprintf(f_dbg, "- ret\n"); fflush(f_dbg);
-#endif
-}
-
-// ffihints: CakeML calls this to fetch the next hint
-// c[0..3]: nb_hints as little-endian hint
-void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
-  (void)clen; (void)alen;
-  assert(clen == 4);
-#ifdef IMPCHECK_DEBUG_FILE
-  fprintf(f_dbg, "ffihints\n"); fflush(f_dbg);
-#endif
-
-  int nb_hints;
-  memcpy(&nb_hints, c, sizeof(int));
-  assert(nb_hints >= 0);
-  assert((long)(nb_hints * sizeof(u64)) <= alen);
-
-  // Read external hints, save originals, write internal IDs to CakeML's array
-  u64_vec_reserve(last_hints, nb_hints);
-  trusted_utils_read_uls(last_hints->data, nb_hints, input);
-  last_hints->size = nb_hints;
-  for (int i = 0; i < nb_hints; i++) {
-    u64 iid = external_to_internal_id(last_hints->data[i]);
-    memcpy(&a[i * sizeof(u64)], &iid, sizeof(u64));
-  }
-}
-
-// fficallback: CakeML reports result, C performs I/O response.
-// c[0]: result byte ('0' = error, nonzero = ok)
-// c[1..clen-1]: error message from CakeML (if any)
-// a: the same 17-byte step header from ffistep
-// buf_lits is guaranteed to contain the clause for PRODUCE and IMPORT
-void fficallback (unsigned char *c, long clen, unsigned char *a, long alen) {
-  (void)alen;
-  assert(clen >= 1);
-  assert(alen == 17);
-
-  bool cml_ok = c[0] != '0';
-  if (IMPCHK_UNLIKELY(!cml_ok && clen > 1)) {
-      // Copy CakeML error message into trusted_utils_msgstr
-      long msglen = clen - 1;
-      if (msglen > 511) msglen = 511;
-      memcpy(trusted_utils_msgstr, &c[1], msglen);
-      trusted_utils_msgstr[msglen] = '\0';
-  }
-  all_ok = cml_ok && all_ok;
-
-  if (last_cls_data) {
-    if (IMPCHK_UNLIKELY(!all_ok))
-      react_error_char(&a[0]);
-    return;
-  }
-
-  int directive = a[0];
-#ifdef IMPCHECK_DEBUG_FILE
-  fprintf(f_dbg, "fficallback %c %i\n", (char)directive, all_ok?1:0); fflush(f_dbg);
-#endif
-
-  if (directive == TRUSTED_CHK_CLS_PRODUCE) {
-
-      const bool share = trusted_utils_read_bool(input);
-
-      // CakeML handles RUP checking; C computes signature if sharing
-      // Only need to compute signature if in a valid state
-      if (all_ok && share) {
-          compute_clause_signature(last_eid, buf_lits->data, last_nb_lits, buf_sig);
-      }
-
-      say(all_ok);
-      if (share) trusted_utils_write_sig(buf_sig, output);
-#if IMPCHECK_FLUSH_ALWAYS
-      UNLOCKED_IO(fflush)(output);
-#endif
-      nb_produced++;
-
-  } else if (directive == TRUSTED_CHK_CLS_IMPORT) {
-
-      trusted_utils_read_sig(buf_sig, input);
-      signature computed_sig;
-      compute_clause_signature(last_eid, buf_lits->data, last_nb_lits, computed_sig);
-      if (IMPCHK_UNLIKELY(!trusted_utils_equal_signatures(buf_sig, computed_sig))) {
-          snprintf(trusted_utils_msgstr, 512, "Signature check of clause %lu failed", last_eid);
-          react_error();
-      }
-      say(all_ok);
-      nb_imported++;
-
-  } else if (directive == TRUSTED_CHK_CLS_DELETE) {
-
-      // Free internal IDs for each deleted clause
-      for (u64 i = 0; i < last_hints->size; i++) {
-          free_id(last_hints->data[i]);
-      }
-      say(all_ok);
-      nb_deleted += last_hints->size;
-
-  } else if (directive == TRUSTED_CHK_VALIDATE_UNSAT) {
-
-      // CakeML checks empty clause; C computes result signature
-      if (all_ok) confirm_result(formula_sig, 20, buf_sig);
-      say(all_ok);
-      trusted_utils_write_sig(buf_sig, output);
-      UNLOCKED_IO(fflush)(output);
-      if (all_ok) trusted_utils_log("UNSAT validated");
-  }
-
-#if IMPCHECK_WRITE_DIRECTIVES
-  writer_flush();
-#endif
-
-  if (IMPCHK_UNLIKELY(!all_ok)) {
-    react_error_char(&a[0]);
-  }
-}
-
-
-
-
 // ffistep: CakeML calls this to get the header for the next instruction
 // {'a' | nb_lits | nb_hints} - produce
 // {'i' | nb_lits} - import
@@ -746,5 +597,151 @@ void ffistep (unsigned char *empty, long clen, unsigned char *a, long alen){
       snprintf(trusted_utils_msgstr, sizeof(trusted_utils_msgstr),
                "Invalid directive in ffistep: '%c' (%d)", c, c);
       react_error_char(&a[0]);
+  }
+}
+
+// fficlause: CakeML calls this to fetch the next clause
+// c[0]: nonzero = trusted (import), 0 = untrusted (produce)
+// c[1..4]: nb_lits as little-endian int
+void fficlause (unsigned char *c, long clen, unsigned char *a, long alen){
+  (void)clen; (void)alen;
+  assert(clen == 5);
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "fficlause\n"); fflush(f_dbg);
+#endif
+
+  bool trusted = c[0];
+  int nb_lits;
+  memcpy(&nb_lits, &c[1], sizeof(int));
+  assert(nb_lits >= 0);
+  assert(nb_lits == last_nb_lits);
+  assert((long)(nb_lits * sizeof(int)) <= alen);
+
+  if (trusted) {
+      if (last_cls_data) {
+          memcpy(a, last_cls_data, nb_lits * sizeof(int));
+      } else {
+          // Read literals into buf_lits (for fficallback), then copy to CakeML
+          read_literals(nb_lits);
+          memcpy(a, buf_lits->data, nb_lits * sizeof(int));
+      }
+  } else {
+      // Untrusted clause literals already read by ffistep into buf_lits
+      memcpy(a, buf_lits->data, nb_lits * sizeof(int));
+  }
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "- ret\n"); fflush(f_dbg);
+#endif
+}
+
+// ffihints: CakeML calls this to fetch the next hint
+// c[0..3]: nb_hints as little-endian hint
+void ffihints (unsigned char *c, long clen, unsigned char *a, long alen){
+  (void)clen; (void)alen;
+  assert(clen == 4);
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "ffihints\n"); fflush(f_dbg);
+#endif
+
+  int nb_hints;
+  memcpy(&nb_hints, c, sizeof(int));
+  assert(nb_hints >= 0);
+  assert((long)(nb_hints * sizeof(u64)) <= alen);
+
+  // Read external hints, save originals, write internal IDs to CakeML's array
+  u64_vec_reserve(last_hints, nb_hints);
+  trusted_utils_read_uls(last_hints->data, nb_hints, input);
+  last_hints->size = nb_hints;
+  for (int i = 0; i < nb_hints; i++) {
+    u64 iid = external_to_internal_id(last_hints->data[i]);
+    memcpy(&a[i * sizeof(u64)], &iid, sizeof(u64));
+  }
+}
+
+// fficallback: CakeML reports result, C performs I/O response.
+// c[0]: result byte ('0' = error, nonzero = ok)
+// c[1..clen-1]: error message from CakeML (if any)
+// a: the same 17-byte step header from ffistep
+// buf_lits is guaranteed to contain the clause for PRODUCE and IMPORT
+void fficallback (unsigned char *c, long clen, unsigned char *a, long alen) {
+  (void)alen;
+  assert(clen >= 1);
+  assert(alen == 17);
+
+  bool cml_ok = c[0] != '0';
+  if (IMPCHK_UNLIKELY(!cml_ok && clen > 1)) {
+      // Copy CakeML error message into trusted_utils_msgstr
+      long msglen = clen - 1;
+      if (msglen > 511) msglen = 511;
+      memcpy(trusted_utils_msgstr, &c[1], msglen);
+      trusted_utils_msgstr[msglen] = '\0';
+  }
+  all_ok = cml_ok && all_ok;
+
+  if (last_cls_data) {
+    if (IMPCHK_UNLIKELY(!all_ok))
+      react_error_char(&a[0]);
+    return;
+  }
+
+  int directive = a[0];
+#ifdef IMPCHECK_DEBUG_FILE
+  fprintf(f_dbg, "fficallback %c %i\n", (char)directive, all_ok?1:0); fflush(f_dbg);
+#endif
+
+  if (directive == TRUSTED_CHK_CLS_PRODUCE) {
+
+      const bool share = trusted_utils_read_bool(input);
+
+      // CakeML handles RUP checking; C computes signature if sharing
+      // Only need to compute signature if in a valid state
+      if (all_ok && share) {
+          compute_clause_signature(last_eid, buf_lits->data, last_nb_lits, buf_sig);
+      }
+
+      say(all_ok);
+      if (share) trusted_utils_write_sig(buf_sig, output);
+#if IMPCHECK_FLUSH_ALWAYS
+      UNLOCKED_IO(fflush)(output);
+#endif
+      nb_produced++;
+
+  } else if (directive == TRUSTED_CHK_CLS_IMPORT) {
+
+      trusted_utils_read_sig(buf_sig, input);
+      signature computed_sig;
+      compute_clause_signature(last_eid, buf_lits->data, last_nb_lits, computed_sig);
+      if (IMPCHK_UNLIKELY(!trusted_utils_equal_signatures(buf_sig, computed_sig))) {
+          snprintf(trusted_utils_msgstr, 512, "Signature check of clause %lu failed", last_eid);
+          react_error();
+      }
+      say(all_ok);
+      nb_imported++;
+
+  } else if (directive == TRUSTED_CHK_CLS_DELETE) {
+
+      // Free internal IDs for each deleted clause
+      for (u64 i = 0; i < last_hints->size; i++) {
+          free_id(last_hints->data[i]);
+      }
+      say(all_ok);
+      nb_deleted += last_hints->size;
+
+  } else if (directive == TRUSTED_CHK_VALIDATE_UNSAT) {
+
+      // CakeML checks empty clause; C computes result signature
+      if (all_ok) confirm_result(formula_sig, 20, buf_sig);
+      say(all_ok);
+      trusted_utils_write_sig(buf_sig, output);
+      UNLOCKED_IO(fflush)(output);
+      if (all_ok) trusted_utils_log("UNSAT validated");
+  }
+
+#if IMPCHECK_WRITE_DIRECTIVES
+  writer_flush();
+#endif
+
+  if (IMPCHK_UNLIKELY(!all_ok)) {
+    react_error_char(&a[0]);
   }
 }
