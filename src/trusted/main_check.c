@@ -15,8 +15,8 @@ int main(int argc, char *argv[]) {
     bool check_model = false, lenient = false;
     long producer_id = 0, producer_count = 0, heap_megabytes = 2048;
     for (int i = 1; i < argc; i++) {
-        trusted_utils_try_match_arg(argv[i], "-fifo-directives=", &fifo_directives);
-        trusted_utils_try_match_arg(argv[i], "-fifo-feedback=", &fifo_feedback);
+        trusted_utils_try_match_arg(argv[i], "-directives=", &fifo_directives);
+        trusted_utils_try_match_arg(argv[i], "-feedback=", &fifo_feedback);
         trusted_utils_try_match_arg(argv[i], "-key-seed=", &seed_str);
         trusted_utils_try_match_long(argv[i], "-producer-id=", &producer_id);
         trusted_utils_try_match_long(argv[i], "-producer-count=", &producer_count);

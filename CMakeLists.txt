@@ -20,14 +20,14 @@ endif()
 add_executable(impcheck_parse
     src/trusted/hash.c src/trusted/secret.c src/trusted/siphash.c src/trusted/trusted_parser.c src/trusted/trusted_utils.c src/trusted/vectors.c src/writer.c 
     src/trusted/main_parse.c)
-add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.S
-    COMMAND ./cake --main_return=true < rup.cml > rup.S
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.cml
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml
-    COMMENT "Building rup.S from rup.cml"
-)
-add_custom_target(rup_cml ALL DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.S)
+#add_custom_command(
+#    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.S
+#    COMMAND ./cake --main_return=true < rup.cml > rup.S
+#    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.cml
+#    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml
+#    COMMENT "Building rup.S from rup.cml"
+#)
+#add_custom_target(rup_cml ALL DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/trusted/cakeml/rup.S)
 
 # This is the important one for verified checking 
 add_executable(impcheck_check
